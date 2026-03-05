@@ -14,6 +14,7 @@ locker = threading.Lock()
 
 mj_model = mujoco.MjModel.from_xml_path(config.ROBOT_SCENE)
 mj_data = mujoco.MjData(mj_model)
+mujoco.mj_resetDataKeyframe(mj_model, mj_data, 0)  # start from "home" pose
 
 
 if config.ENABLE_ELASTIC_BAND:
