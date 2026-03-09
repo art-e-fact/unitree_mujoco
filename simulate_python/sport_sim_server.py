@@ -15,7 +15,6 @@ Usage:
 import sys
 import os
 import json
-import time
 import threading
 import argparse
 import numpy as np
@@ -56,15 +55,16 @@ import config
 from go2_wtw_demo import WalkTheseWaysController, DEFAULT_JOINT_ANGLES_WTW, WTW_TO_MUJOCO_CTRL
 
 # ---------------------------------------------------------------------------
-# Stand poses from src/unitree_mujoco/example/python/stand_go2.py
-# Motor (ctrl) order: FR, FL, RR, RL — same as LowCmd motor_cmd indices
+# Stand poses in ctrl order (FR, FL, RR, RL)
 # ---------------------------------------------------------------------------
-STAND_UP_POS = np.array([
-     0.00571868,  0.608813, -1.21763,   # FR
-    -0.00571868,  0.608813, -1.21763,   # FL
-     0.00571868,  0.608813, -1.21763,   # RR
-    -0.00571868,  0.608813, -1.21763,   # RL
-], dtype=np.float64)
+# DEFAULT_JOINT_ANGLES_WTW is in WTW order (FL, FR, RL, RR).
+# Reorder to ctrl order so the STANDING_UP transition lands exactly at the
+# WTW reference pose — this eliminates the large position error that caused
+# shakiness when WTW first ran during STANDING.
+_WTW_STAND_POS = np.zeros(12, dtype=np.float64)
+for _i in range(12):
+    _WTW_STAND_POS[WTW_TO_MUJOCO_CTRL[_i]] = DEFAULT_JOINT_ANGLES_WTW[_i]
+STAND_UP_POS = _WTW_STAND_POS  # [-0.1, 0.8, -1.5,  0.1, 0.8, -1.5,  -0.1, 1.0, -1.5,  0.1, 1.0, -1.5]
 
 STAND_DOWN_POS = np.array([
      0.0473455,  1.22187, -2.44375,     # FR
@@ -74,8 +74,12 @@ STAND_DOWN_POS = np.array([
 ], dtype=np.float64)
 
 TRANSITION_DURATION = 2.0   # seconds (tanh ramp)
-CONTROL_DT = 0.01           # 100 Hz (WTW policy still steps at 50 Hz)
-WTW_STEP_EVERY = 2          # step WTW policy every N control ticks → 50 Hz
+WTW_HZ = 50                 # target WTW policy rate (Hz)
+IDLE_SETTLE_S = 0.5         # seconds to wait after bridge connects before handing off to WTW
+
+# Derived from sim timestep — adapts if config.SIMULATE_DT changes
+WTW_STEP_EVERY    = max(1, round(1.0 / (WTW_HZ * config.SIMULATE_DT)))
+IDLE_SETTLE_TICKS = round(IDLE_SETTLE_S / config.SIMULATE_DT)
 
 
 # ---------------------------------------------------------------------------
@@ -166,15 +170,18 @@ class SportSimServer(Server):
 
         self._lock = threading.Lock()
         self._lowstate: LowState_ | None = None
+        self._lowstate_event = threading.Event()
+        self._lowstate_count = 0          # increments with every rt/lowstate message
 
         self._state = State.IDLE
-        self._idle_connected_at = 0.0
+        self._idle_connected_count = 0    # lowstate_count when bridge first seen
         self._vx = 0.0
         self._vy = 0.0
         self._vyaw = 0.0
-        self._transition_start = 0.0
+        self._transition_start_count = 0  # lowstate_count when transition began
         self._transition_from = np.zeros(12)
         self._transition_to   = np.zeros(12)
+        self._last_walking_cmd = None
 
         self._lowstate_sub = ChannelSubscriber("rt/lowstate", LowState_)
         self._lowstate_sub.Init(self._on_lowstate, 10)
@@ -186,20 +193,21 @@ class SportSimServer(Server):
     def _on_lowstate(self, msg: LowState_):
         with self._lock:
             self._lowstate = msg
+            self._lowstate_count += 1
+            count = self._lowstate_count
+
             if self._state == State.IDLE:
                 self._state = State.IDLE_CONNECTED
-                self._idle_connected_at = time.perf_counter()
+                self._idle_connected_count = count
                 print("[sport_sim_server] Bridge connected. Settling…")
 
             elif self._state == State.IDLE_CONNECTED:
-                if time.perf_counter() - self._idle_connected_at >= 0.5:
-                    self._transition_from = np.array(
-                        [msg.motor_state[i].q for i in range(12)]
-                    )
-                    self._transition_to = STAND_UP_POS.copy()
-                    self._transition_start = time.perf_counter()
-                    self._state = State.STANDING_UP
-                    print("[sport_sim_server] Standing up gradually…")
+                if count - self._idle_connected_count >= IDLE_SETTLE_TICKS:
+                    self._controller.reset()
+                    self._state = State.STANDING
+                    print("[sport_sim_server] Standing complete.")
+
+        self._lowstate_event.set()
 
     # ------------------------------------------------------------ RPC init
     def Init(self):
@@ -238,8 +246,9 @@ class SportSimServer(Server):
                 [self._lowstate.motor_state[i].q for i in range(12)]
             )
             self._transition_to = STAND_UP_POS.copy()
-            self._transition_start = time.perf_counter()
+            self._transition_start_count = self._lowstate_count
             self._state = State.STANDING_UP
+            self._controller.reset()  # clear stale history from any fall
             print("[sport_sim_server] StandUp")
         return 0, ""
 
@@ -251,7 +260,7 @@ class SportSimServer(Server):
                 [self._lowstate.motor_state[i].q for i in range(12)]
             )
             self._transition_to = STAND_DOWN_POS.copy()
-            self._transition_start = time.perf_counter()
+            self._transition_start_count = self._lowstate_count
             self._state = State.STANDING_DOWN
             print("[sport_sim_server] StandDown")
         return 0, ""
@@ -301,35 +310,39 @@ class SportSimServer(Server):
         return cmd
 
     def run_control_loop(self):
-        print("[sport_sim_server] Control loop running at 100 Hz (WTW at 50 Hz)")
-        tick = 0
-        last_walking_cmd = None
+        print(f"[sport_sim_server] Control loop running (event-driven on rt/lowstate; WTW every {WTW_STEP_EVERY} messages → {WTW_HZ} Hz sim-time)")
         while True:
-            t0 = time.perf_counter()
+            self._lowstate_event.wait()
+            self._lowstate_event.clear()
 
             with self._lock:
-                state      = self._state
-                lowstate   = self._lowstate
+                state        = self._state
+                lowstate     = self._lowstate
+                count        = self._lowstate_count
                 vx, vy, vyaw = self._vx, self._vy, self._vyaw
-                t_start    = self._transition_start
-                t_from     = self._transition_from.copy()
-                t_to       = self._transition_to.copy()
+                t_start_count = self._transition_start_count
+                t_from       = self._transition_from.copy()
+                t_to         = self._transition_to.copy()
 
             if lowstate is None:
-                time.sleep(CONTROL_DT)
                 continue
 
             cmd = None
 
-            if state == State.DAMP:
+            if state == State.IDLE_CONNECTED:
+                hold = np.array([lowstate.motor_state[i].q for i in range(12)])
+                cmd = self._make_lowcmd(hold, kp=50.0, kd=3.5)
+
+            elif state == State.DAMP:
                 hold = np.array([lowstate.motor_state[i].q for i in range(12)])
                 cmd = self._make_lowcmd(hold, kp=0.0, kd=2.0)
 
             elif state in (State.STANDING_UP, State.STANDING_DOWN):
-                elapsed = time.perf_counter() - t_start
+                # elapsed measured in sim time via lowstate count
+                elapsed = (count - t_start_count) * config.SIMULATE_DT
                 phase   = float(np.tanh(elapsed / TRANSITION_DURATION))
                 target  = (1.0 - phase) * t_from + phase * t_to
-                kp      = phase * 50.0 + (1.0 - phase) * 10.0
+                kp      = phase * 50.0 + (1.0 - phase) * 20.0
                 cmd = self._make_lowcmd(target, kp=kp, kd=3.5)
                 if phase >= 0.99:
                     with self._lock:
@@ -337,29 +350,23 @@ class SportSimServer(Server):
                             State.STANDING if state == State.STANDING_UP else State.IDLE
                         )
                     print(f"[sport_sim_server] Transition done → {self._state}")
+                    if state == State.STANDING_UP:
+                        print("[sport_sim_server] Standing complete.")
 
-            elif state == State.STANDING:
-                cmd = self._make_lowcmd(STAND_UP_POS, kp=50.0, kd=3.5)
-
-            elif state == State.WALKING:
-                # Step WTW policy at 50 Hz; republish last cmd on odd ticks
-                if tick % WTW_STEP_EVERY == 0:
-                    commands    = self._controller.get_commands(vx, vy, vyaw)
+            elif state in (State.STANDING, State.WALKING):
+                v = (vx, vy, vyaw) if state == State.WALKING else (0.0, 0.0, 0.0)
+                if count % WTW_STEP_EVERY == 0:
+                    commands    = self._controller.get_commands(*v)
                     target_ctrl = self._controller.step_from_lowstate(lowstate, commands)
-                    last_walking_cmd = self._make_lowcmd(
+                    self._last_walking_cmd = self._make_lowcmd(
                         target_ctrl,
                         kp=self._controller.stiffness,
                         kd=self._controller.damping,
                     )
-                cmd = last_walking_cmd
+                cmd = self._last_walking_cmd
 
             if cmd is not None:
                 self._lowcmd_pub.Write(cmd)
-
-            tick += 1
-            sleep = CONTROL_DT - (time.perf_counter() - t0)
-            if sleep > 0:
-                time.sleep(sleep)
 
 
 # ---------------------------------------------------------------------------
