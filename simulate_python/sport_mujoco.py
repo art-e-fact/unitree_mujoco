@@ -31,9 +31,13 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src", "unitree_sdk2_python"))
 sys.path.insert(0, _PROJECT_ROOT)  # for go2_wtw_demo
 
+import cv2
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowState_ as LowState_default
+from unitree_sdk2py.go2.video.video_api import (
+    VIDEO_SERVICE_NAME, VIDEO_API_VERSION, VIDEO_API_ID_GETIMAGESAMPLE,
+)
 from unitree_sdk2py.rpc.server import Server
 from unitree_sdk2py.rpc.internal import RPC_ERR_SERVER_API_NOT_IMPL
 from unitree_sdk2py.go2.sport.sport_api import (
@@ -335,6 +339,33 @@ class SportMuJoCoServer(Server):
 
 
 # ---------------------------------------------------------------------------
+# Video RPC server — serves the "videohub" API used by camera_opencv.py
+# ---------------------------------------------------------------------------
+CAMERA_HZ = 30  # render rate (Hz)
+
+class VideoSimServer(Server):
+    """Serves GetImageSample RPC with frames rendered from the MuJoCo camera."""
+
+    def __init__(self):
+        super().__init__(VIDEO_SERVICE_NAME)
+        self._lock = threading.Lock()
+        self._latest_jpeg: bytes = b""
+
+    def Init(self):
+        self._SetApiVersion(VIDEO_API_VERSION)
+        self._RegistBinaryHandler(VIDEO_API_ID_GETIMAGESAMPLE, self._handle_get_image, False)
+
+    def update_frame(self, jpeg_bytes: bytes):
+        with self._lock:
+            self._latest_jpeg = jpeg_bytes
+
+    def _handle_get_image(self, _parameter_binary):
+        with self._lock:
+            data = list(self._latest_jpeg)
+        return 0, data
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
@@ -369,14 +400,30 @@ def main():
     num_motor        = mj_model.nu
     dim_motor_sensor = 3 * num_motor  # q, dq, tau_est per motor
 
-    # --- Controller + RPC server --------------------------------------------
+    # --- Controller + RPC servers -------------------------------------------
     controller = SportDirectController(args.model_dir, args.cfg_path)
     server = SportMuJoCoServer(controller, num_motor)
+
+    cam_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_CAMERA, "front_camera")
+    has_camera = cam_id >= 0
+    if has_camera:
+        camera_step_every = max(1, round(1.0 / (CAMERA_HZ * config.SIMULATE_DT)))
+        video_server = VideoSimServer()
+    else:
+        print("[sport_mujoco] WARNING: 'front_camera' not found in model — video API disabled")
+    # Renderer is created lazily on first _step() call so it shares the calling
+    # thread's OpenGL/EGL context (creating it on the main thread and using it
+    # from SimulationThread would cause context-mismatch → garbage frames).
+    camera_renderer: mujoco.Renderer | None = None
 
     print(f"[sport_mujoco] DDS domain={args.domain} interface={args.interface}")
     ChannelFactoryInitialize(args.domain, args.interface)
     server.Init()
     server.Start()
+    if has_camera:
+        video_server.Init()
+        video_server.Start()
+        print(f"[sport_mujoco] Video RPC serving (front_camera @ {CAMERA_HZ} Hz)")
 
     # --- lowstate publisher (re-enables record_joints.py and other subscribers)
     low_state     = LowState_default()
@@ -386,8 +433,15 @@ def main():
     print(f"[sport_mujoco] WTW every {WTW_STEP_EVERY} steps → {WTW_HZ} Hz sim-time")
 
     # --- Sim loop -----------------------------------------------------------
+    _sim_step_count = 0
+
     def _step():
-        """One physics step: compute ctrl, step, publish lowstate."""
+        nonlocal _sim_step_count, camera_renderer
+        # Lazily create renderer on the first call so it belongs to this thread's
+        # OpenGL/EGL context (avoids garbage frames from context mismatch).
+        if has_camera and camera_renderer is None:
+            camera_renderer = mujoco.Renderer(mj_model, height=480, width=640)
+            print("[sport_mujoco] Camera renderer initialised on sim thread.")
         ctrl_target, kp, kd = server.tick(mj_data.sensordata, num_motor, dim_motor_sensor)
         for i in range(num_motor):
             q  = mj_data.sensordata[i]
@@ -403,6 +457,25 @@ def main():
         low_state.imu_state.quaternion[2] = mj_data.sensordata[dim_motor_sensor + 2]
         low_state.imu_state.quaternion[3] = mj_data.sensordata[dim_motor_sensor + 3]
         low_state_pub.Write(low_state)
+        if has_camera and _sim_step_count % camera_step_every == 0:
+            camera_renderer.update_scene(mj_data, camera=cam_id)
+            rgb = camera_renderer.render()
+            # Normalise: renderer returns uint8 [0,255] in modern mujoco
+            if rgb.dtype != np.uint8:
+                rgb = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+            # Drop alpha channel if renderer returned RGBA
+            if rgb.ndim == 3 and rgb.shape[2] == 4:
+                rgb = rgb[:, :, :3]
+            ok, jpeg = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+            if ok:
+                jpeg_bytes = jpeg.tobytes()
+                if _sim_step_count == 0:  # save very first frame for inspection
+                    cv2.imwrite("/tmp/sport_mujoco_frame0.jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+                    print(f"[camera] first frame: shape={rgb.shape} dtype={rgb.dtype} "
+                          f"min={rgb.min()} max={rgb.max()} mean={rgb.mean():.1f} "
+                          f"JPEG={len(jpeg_bytes)} bytes → /tmp/sport_mujoco_frame0.jpg")
+                video_server.update_frame(jpeg_bytes)
+        _sim_step_count += 1
 
     if args.headless:
         print("[sport_mujoco] Running headless.")
