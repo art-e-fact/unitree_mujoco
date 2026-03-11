@@ -348,6 +348,8 @@ class VideoSimServer(Server):
 
     def __init__(self):
         super().__init__(VIDEO_SERVICE_NAME)
+        # Workaround: SDK bug initializes __apiBinarySet as {} instead of set()
+        self._Server__apiBinarySet = set()
         self._lock = threading.Lock()
         self._latest_jpeg: bytes = b""
 
