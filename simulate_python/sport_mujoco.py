@@ -17,6 +17,7 @@ Usage (two terminals):
 
 import sys
 import os
+import signal
 import json
 import time
 import threading
@@ -29,7 +30,6 @@ from threading import Thread
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src", "unitree_sdk2_python"))
-sys.path.insert(0, _PROJECT_ROOT)  # for go2_wtw_demo
 
 import cv2
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
@@ -59,7 +59,7 @@ from unitree_sdk2py.go2.sport.sport_api import (
 )
 
 import config
-from go2_wtw_demo import WalkTheseWaysController, DEFAULT_JOINT_ANGLES_WTW, WTW_TO_MUJOCO_CTRL
+from wtw_controller import WalkTheseWaysController, DEFAULT_JOINT_ANGLES_WTW, WTW_TO_MUJOCO_CTRL
 
 # ---------------------------------------------------------------------------
 # Stand poses (ctrl order: FR, FL, RR, RL)
@@ -373,22 +373,11 @@ def main():
     parser.add_argument("--interface", default=config.INTERFACE)
     parser.add_argument("--domain",    default=config.DOMAIN_ID, type=int)
     parser.add_argument("--headless",  action="store_true", help="Run without viewer")
-    parser.add_argument(
-        "--model-dir",
-        default=os.path.join(
-            _PROJECT_ROOT,
-            "src/walk-these-ways-go2/runs/gait-conditioned-agility/"
-            "pretrain-go2/train/142238.667503/checkpoints",
-        ),
-    )
-    parser.add_argument(
-        "--cfg-path",
-        default=os.path.join(
-            _PROJECT_ROOT,
-            "src/walk-these-ways-go2/runs/gait-conditioned-agility/"
-            "pretrain-go2/train/142238.667503/parameters_cpu.pkl",
-        ),
-    )
+    parser.add_argument("--record",    metavar="PATH",       default=None,
+                        help="Save spectator-view recording to PATH (e.g. run.mp4)")
+    _WTW_DIR = os.path.join(os.path.dirname(__file__), "wtw")
+    parser.add_argument("--model-dir", default=_WTW_DIR)
+    parser.add_argument("--cfg-path",  default=os.path.join(_WTW_DIR, "parameters_cpu.pkl"))
     args = parser.parse_args()
 
     # --- MuJoCo setup -------------------------------------------------------
@@ -416,6 +405,20 @@ def main():
     # from SimulationThread would cause context-mismatch → garbage frames).
     camera_renderer: mujoco.Renderer | None = None
 
+    # --- Recording setup ----------------------------------------------------
+    RECORD_HZ = 30
+    RECORD_W, RECORD_H = 1280, 720
+    record_renderer: mujoco.Renderer | None = None
+    record_ffmpeg = None  # subprocess.Popen piping raw RGB to ffmpeg
+    if args.record:
+        spec_cam_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_CAMERA, "spectator")
+        if spec_cam_id < 0:
+            print("[sport_mujoco] WARNING: 'spectator' camera not found — recording disabled")
+            args.record = None
+        else:
+            record_step_every = max(1, round(1.0 / (RECORD_HZ * config.SIMULATE_DT)))
+            print(f"[sport_mujoco] Recording to {args.record} @ {RECORD_HZ} Hz")
+
     print(f"[sport_mujoco] DDS domain={args.domain} interface={args.interface}")
     ChannelFactoryInitialize(args.domain, args.interface)
     server.Init()
@@ -436,12 +439,28 @@ def main():
     _sim_step_count = 0
 
     def _step():
-        nonlocal _sim_step_count, camera_renderer
-        # Lazily create renderer on the first call so it belongs to this thread's
+        nonlocal _sim_step_count, camera_renderer, record_renderer, record_ffmpeg
+        # Lazily create renderers on the first call so they belong to this thread's
         # OpenGL/EGL context (avoids garbage frames from context mismatch).
         if has_camera and camera_renderer is None:
             camera_renderer = mujoco.Renderer(mj_model, height=480, width=640)
             print("[sport_mujoco] Camera renderer initialised on sim thread.")
+        if args.record and record_renderer is None:
+            record_renderer = mujoco.Renderer(mj_model, height=RECORD_H, width=RECORD_W)
+            record_ffmpeg = __import__("subprocess").Popen([
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{RECORD_W}x{RECORD_H}",
+                "-pix_fmt", "rgb24",
+                "-r", str(RECORD_HZ),
+                "-i", "pipe:",
+                "-vcodec", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "fast",
+                "-movflags", "+faststart",
+                args.record,
+            ], stdin=__import__("subprocess").PIPE, stderr=__import__("subprocess").DEVNULL)
+            print(f"[sport_mujoco] Record renderer initialised on sim thread.")
         ctrl_target, kp, kd = server.tick(mj_data.sensordata, num_motor, dim_motor_sensor)
         for i in range(num_motor):
             q  = mj_data.sensordata[i]
@@ -475,42 +494,59 @@ def main():
                           f"min={rgb.min()} max={rgb.max()} mean={rgb.mean():.1f} "
                           f"JPEG={len(jpeg_bytes)} bytes → /tmp/sport_mujoco_frame0.jpg")
                 video_server.update_frame(jpeg_bytes)
+        if args.record and record_ffmpeg is not None and _sim_step_count % record_step_every == 0:
+            record_renderer.update_scene(mj_data, camera=spec_cam_id)
+            frame = record_renderer.render()
+            if frame.dtype != np.uint8:
+                frame = (np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)
+            if frame.ndim == 3 and frame.shape[2] == 4:
+                frame = frame[:, :, :3]
+            record_ffmpeg.stdin.write(frame.tobytes())
         _sim_step_count += 1
 
-    if args.headless:
-        print("[sport_mujoco] Running headless.")
-        while True:
-            t0 = time.perf_counter()
-            _step()
-            dt_left = config.SIMULATE_DT - (time.perf_counter() - t0)
-            if dt_left > 0:
-                time.sleep(dt_left)
-    else:
-        viewer = mujoco.viewer.launch_passive(mj_model, mj_data)
-        time.sleep(0.2)
-        locker = threading.Lock()
-
-        def SimulationThread():
-            while viewer.is_running():
+    try:
+        if args.headless:
+            print("[sport_mujoco] Running headless.")
+            while True:
                 t0 = time.perf_counter()
-                with locker:
-                    _step()
+                _step()
                 dt_left = config.SIMULATE_DT - (time.perf_counter() - t0)
                 if dt_left > 0:
                     time.sleep(dt_left)
+        else:
+            viewer = mujoco.viewer.launch_passive(mj_model, mj_data)
+            time.sleep(0.2)
+            locker = threading.Lock()
 
-        def PhysicsViewerThread():
-            while viewer.is_running():
-                with locker:
-                    viewer.sync()
-                time.sleep(config.VIEWER_DT)
+            def SimulationThread():
+                while viewer.is_running():
+                    t0 = time.perf_counter()
+                    with locker:
+                        _step()
+                    dt_left = config.SIMULATE_DT - (time.perf_counter() - t0)
+                    if dt_left > 0:
+                        time.sleep(dt_left)
 
-        sim_thread    = Thread(target=SimulationThread,    daemon=True)
-        viewer_thread = Thread(target=PhysicsViewerThread, daemon=True)
-        sim_thread.start()
-        viewer_thread.start()
-        sim_thread.join()
+            def PhysicsViewerThread():
+                while viewer.is_running():
+                    with locker:
+                        viewer.sync()
+                    time.sleep(config.VIEWER_DT)
+
+            sim_thread    = Thread(target=SimulationThread,    daemon=True)
+            viewer_thread = Thread(target=PhysicsViewerThread, daemon=True)
+            sim_thread.start()
+            viewer_thread.start()
+            sim_thread.join()
+    finally:
+        if record_ffmpeg is not None:
+            record_ffmpeg.stdin.close()
+            record_ffmpeg.wait()
+            print(f"[sport_mujoco] Recording saved: {args.record}")
 
 
 if __name__ == "__main__":
+    # Convert SIGTERM → SystemExit so try/finally (e.g. record_writer.release())
+    # runs when the parent process terminates us cleanly.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     main()
