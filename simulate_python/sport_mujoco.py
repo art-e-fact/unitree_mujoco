@@ -372,6 +372,8 @@ def main():
     parser = argparse.ArgumentParser(description="Unified MuJoCo sim + WTW sport server")
     parser.add_argument("--interface", default=config.INTERFACE)
     parser.add_argument("--domain",    default=config.DOMAIN_ID, type=int)
+    parser.add_argument("--scene",     default=config.ROBOT_SCENE,
+                        help="Path to MuJoCo scene XML (default: config.ROBOT_SCENE)")
     parser.add_argument("--headless",  action="store_true", help="Run without viewer")
     parser.add_argument("--record",    metavar="PATH",       default=None,
                         help="Save spectator-view recording to PATH (e.g. run.mp4)")
@@ -381,7 +383,7 @@ def main():
     args = parser.parse_args()
 
     # --- MuJoCo setup -------------------------------------------------------
-    mj_model = mujoco.MjModel.from_xml_path(config.ROBOT_SCENE)
+    mj_model = mujoco.MjModel.from_xml_path(args.scene)
     mj_data  = mujoco.MjData(mj_model)
     mujoco.mj_resetDataKeyframe(mj_model, mj_data, 0)
     mj_model.opt.timestep = config.SIMULATE_DT
