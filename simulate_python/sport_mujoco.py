@@ -31,6 +31,7 @@ from threading import Thread
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src", "unitree_sdk2_python"))
 
+import xml.etree.ElementTree as ET
 import cv2
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
@@ -367,6 +368,34 @@ class VideoSimServer(Server):
         return 0, data
 
 
+def _load_scene(scene_path):
+    """Load a scene XML that may live outside the go2 robot directory.
+    Rewrites <include> paths and writes a temp file next to go2.xml so MuJoCo
+    resolves meshdir and asset paths correctly."""
+    scene_path = os.path.abspath(scene_path)
+    scene_dir  = os.path.dirname(scene_path)
+    go2_dir    = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "unitree_robots", "go2"))
+
+    if scene_dir == go2_dir:
+        return mujoco.MjModel.from_xml_path(scene_path)
+
+    tree = ET.parse(scene_path)
+    root = tree.getroot()
+    for elem in root.iter():
+        rel = elem.get("file", "")
+        if rel and not os.path.isabs(rel):
+            elem.set("file", os.path.normpath(os.path.join(scene_dir, rel)))
+
+    tmp = os.path.join(go2_dir, "_tmp_scene.xml")
+    try:
+        tree.write(tmp, encoding="unicode", xml_declaration=False)
+        return mujoco.MjModel.from_xml_path(tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -385,7 +414,7 @@ def main():
     args = parser.parse_args()
 
     # --- MuJoCo setup -------------------------------------------------------
-    mj_model = mujoco.MjModel.from_xml_path(args.scene)
+    mj_model = _load_scene(args.scene)
     mj_data  = mujoco.MjData(mj_model)
     mujoco.mj_resetDataKeyframe(mj_model, mj_data, 0)
     mj_model.opt.timestep = config.SIMULATE_DT
