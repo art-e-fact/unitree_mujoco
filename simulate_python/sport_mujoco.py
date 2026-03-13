@@ -443,14 +443,16 @@ def main():
     RECORD_W, RECORD_H = 1280, 720
     record_renderer: mujoco.Renderer | None = None
     record_ffmpeg = None  # subprocess.Popen piping raw RGB to ffmpeg
+    record_cam    = None  # MjvCamera tracking the robot
     if args.record:
-        spec_cam_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_CAMERA, "spectator")
-        if spec_cam_id < 0:
-            print("[sport_mujoco] WARNING: 'spectator' camera not found — recording disabled")
-            args.record = None
-        else:
-            record_step_every = max(1, round(1.0 / (RECORD_HZ * config.SIMULATE_DT)))
-            print(f"[sport_mujoco] Recording to {args.record} @ {RECORD_HZ} Hz")
+        record_cam = mujoco.MjvCamera()
+        record_cam.type       = mujoco.mjtCamera.mjCAMERA_TRACKING
+        record_cam.trackbodyid = mj_model.body("base_link").id
+        record_cam.distance   = 3.0
+        record_cam.elevation  = -30.0
+        record_cam.azimuth    = 135.0
+        record_step_every = max(1, round(1.0 / (RECORD_HZ * config.SIMULATE_DT)))
+        print(f"[sport_mujoco] Recording to {args.record} @ {RECORD_HZ} Hz")
 
     print(f"[sport_mujoco] DDS domain={args.domain} interface={args.interface}")
     ChannelFactoryInitialize(args.domain, args.interface)
@@ -528,7 +530,7 @@ def main():
                           f"JPEG={len(jpeg_bytes)} bytes → /tmp/sport_mujoco_frame0.jpg")
                 video_server.update_frame(jpeg_bytes)
         if args.record and record_ffmpeg is not None and _sim_step_count % record_step_every == 0:
-            record_renderer.update_scene(mj_data, camera=spec_cam_id)
+            record_renderer.update_scene(mj_data, camera=record_cam)
             frame = record_renderer.render()
             if frame.dtype != np.uint8:
                 frame = (np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)
