@@ -15,52 +15,91 @@ Usage (two terminals):
               python example/go2/high_level/go2_sport_client.py lo
 """
 
-import sys
+import argparse
+import json
 import os
 import signal
-import json
-import time
+import sys
 import threading
-import argparse
-import numpy as np
-import torch
-import mujoco
-import mujoco.viewer
+import time
+from dataclasses import dataclass, field, fields
+from pprint import pprint
 from threading import Thread
 
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+import cyclonedds.idl as idl
+import mujoco
+import mujoco.viewer
+import numpy as np
+import torch
+
+_PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..")
+)
 sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src", "unitree_sdk2_python"))
 
 import xml.etree.ElementTree as ET
-import cv2
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowState_ as LowState_default
-from unitree_sdk2py.go2.video.video_api import (
-    VIDEO_SERVICE_NAME, VIDEO_API_VERSION, VIDEO_API_ID_GETIMAGESAMPLE,
-)
-from unitree_sdk2py.rpc.server import Server
-from unitree_sdk2py.rpc.internal import RPC_ERR_SERVER_API_NOT_IMPL
-from unitree_sdk2py.go2.sport.sport_api import (
-    SPORT_SERVICE_NAME, SPORT_API_VERSION,
-    SPORT_API_ID_DAMP, SPORT_API_ID_BALANCESTAND, SPORT_API_ID_STOPMOVE,
-    SPORT_API_ID_STANDUP, SPORT_API_ID_STANDDOWN, SPORT_API_ID_RECOVERYSTAND,
-    SPORT_API_ID_EULER, SPORT_API_ID_MOVE, SPORT_API_ID_SIT, SPORT_API_ID_RISESIT,
-    SPORT_API_ID_SPEEDLEVEL, SPORT_API_ID_HELLO, SPORT_API_ID_STRETCH,
-    SPORT_API_ID_CONTENT, SPORT_API_ID_DANCE1, SPORT_API_ID_DANCE2,
-    SPORT_API_ID_SWITCHJOYSTICK, SPORT_API_ID_POSE, SPORT_API_ID_SCRAPE,
-    SPORT_API_ID_FRONTFLIP, SPORT_API_ID_FRONTJUMP, SPORT_API_ID_FRONTPOUNCE,
-    SPORT_API_ID_HEART, SPORT_API_ID_STATICWALK, SPORT_API_ID_TROTRUN,
-    SPORT_API_ID_ECONOMICGAIT, SPORT_API_ID_LEFTFLIP, SPORT_API_ID_BACKFLIP,
-    SPORT_API_ID_HANDSTAND, SPORT_API_ID_FREEWALK, SPORT_API_ID_FREEBOUND,
-    SPORT_API_ID_FREEJUMP, SPORT_API_ID_FREEAVOID, SPORT_API_ID_CLASSICWALK,
-    SPORT_API_ID_WALKUPRIGHT, SPORT_API_ID_CROSSSTEP,
-    SPORT_API_ID_AUTORECOVERY_SET, SPORT_API_ID_AUTORECOVERY_GET,
-    SPORT_API_ID_SWITCHAVOIDMODE,
-)
 
 import config
-from wtw_controller import WalkTheseWaysController, DEFAULT_JOINT_ANGLES_WTW, WTW_TO_MUJOCO_CTRL
+import cv2
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
+from unitree_sdk2py.go2.sport.sport_api import (
+    SPORT_API_ID_AUTORECOVERY_GET,
+    SPORT_API_ID_AUTORECOVERY_SET,
+    SPORT_API_ID_BACKFLIP,
+    SPORT_API_ID_BALANCESTAND,
+    SPORT_API_ID_CLASSICWALK,
+    SPORT_API_ID_CONTENT,
+    SPORT_API_ID_CROSSSTEP,
+    SPORT_API_ID_DAMP,
+    SPORT_API_ID_DANCE1,
+    SPORT_API_ID_DANCE2,
+    SPORT_API_ID_ECONOMICGAIT,
+    SPORT_API_ID_EULER,
+    SPORT_API_ID_FREEAVOID,
+    SPORT_API_ID_FREEBOUND,
+    SPORT_API_ID_FREEJUMP,
+    SPORT_API_ID_FREEWALK,
+    SPORT_API_ID_FRONTFLIP,
+    SPORT_API_ID_FRONTJUMP,
+    SPORT_API_ID_FRONTPOUNCE,
+    SPORT_API_ID_HANDSTAND,
+    SPORT_API_ID_HEART,
+    SPORT_API_ID_HELLO,
+    SPORT_API_ID_LEFTFLIP,
+    SPORT_API_ID_MOVE,
+    SPORT_API_ID_POSE,
+    SPORT_API_ID_RECOVERYSTAND,
+    SPORT_API_ID_RISESIT,
+    SPORT_API_ID_SCRAPE,
+    SPORT_API_ID_SIT,
+    SPORT_API_ID_SPEEDLEVEL,
+    SPORT_API_ID_STANDDOWN,
+    SPORT_API_ID_STANDUP,
+    SPORT_API_ID_STATICWALK,
+    SPORT_API_ID_STOPMOVE,
+    SPORT_API_ID_STRETCH,
+    SPORT_API_ID_SWITCHAVOIDMODE,
+    SPORT_API_ID_SWITCHJOYSTICK,
+    SPORT_API_ID_TROTRUN,
+    SPORT_API_ID_WALKUPRIGHT,
+    SPORT_API_VERSION,
+    SPORT_SERVICE_NAME,
+)
+from unitree_sdk2py.go2.video.video_api import (
+    VIDEO_API_ID_GETIMAGESAMPLE,
+    VIDEO_API_VERSION,
+    VIDEO_SERVICE_NAME,
+)
+from unitree_sdk2py.idl.builtin_interfaces.msg.dds_._Time_ import Time_
+from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowState_ as LowState_default
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
+from unitree_sdk2py.rpc.internal import RPC_ERR_SERVER_API_NOT_IMPL
+from unitree_sdk2py.rpc.server import Server
+from wtw_controller import (
+    DEFAULT_JOINT_ANGLES_WTW,
+    WTW_TO_MUJOCO_CTRL,
+    WalkTheseWaysController,
+)
 
 # ---------------------------------------------------------------------------
 # Stand poses (ctrl order: FR, FL, RR, RL)
@@ -70,19 +109,41 @@ for _i in range(12):
     _WTW_STAND_POS[WTW_TO_MUJOCO_CTRL[_i]] = DEFAULT_JOINT_ANGLES_WTW[_i]
 STAND_UP_POS = _WTW_STAND_POS
 
-STAND_DOWN_POS = np.array([
-     0.0473455,  1.22187, -2.44375,   # FR
-    -0.0473455,  1.22187, -2.44375,   # FL
-     0.0473455,  1.22187, -2.44375,   # RR
-    -0.0473455,  1.22187, -2.44375,   # RL
-], dtype=np.float64)
+STAND_DOWN_POS = np.array(
+    [
+        0.0473455,
+        1.22187,
+        -2.44375,  # FR
+        -0.0473455,
+        1.22187,
+        -2.44375,  # FL
+        0.0473455,
+        1.22187,
+        -2.44375,  # RR
+        -0.0473455,
+        1.22187,
+        -2.44375,  # RL
+    ],
+    dtype=np.float64,
+)
 
-TRANSITION_DURATION = 2.0   # seconds (tanh ramp)
-WTW_HZ = 50                 # target WTW policy rate
+TRANSITION_DURATION = 2.0  # seconds (tanh ramp)
+WTW_HZ = 50  # target WTW policy rate
 
 # Derived at import time — adapts if config.SIMULATE_DT changes
-WTW_STEP_EVERY    = max(1, round(1.0 / (WTW_HZ * config.SIMULATE_DT)))
+WTW_STEP_EVERY = max(1, round(1.0 / (WTW_HZ * config.SIMULATE_DT)))
 IDLE_SETTLE_TICKS = round(0.5 / config.SIMULATE_DT)
+
+
+@dataclass
+class DDSTransform(idl.IdlStruct):
+    frame: str
+    parent: str = "world"
+    time: Time_ = field(default_factory=lambda *_: Time_(0, 0))
+    x: float = 0
+    y: float = 0
+    z: float = 0
+    mat: idl.types.array[float, 9] = field(default_factory=lambda *_: [0.0] * 9)
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +205,15 @@ class SportDirectController(WalkTheseWaysController):
 
     def _build_obs_arrays(self, quat, joint_pos_wtw, joint_vel_wtw, commands):
         obs = np.zeros(self.num_obs, dtype=np.float32)
-        obs[0:3]   = self.get_gravity_vector(quat)
-        obs[3:18]  = commands * self.commands_scale
-        obs[18:30] = (joint_pos_wtw - DEFAULT_JOINT_ANGLES_WTW) * self.obs_scales["dof_pos"]
+        obs[0:3] = self.get_gravity_vector(quat)
+        obs[3:18] = commands * self.commands_scale
+        obs[18:30] = (joint_pos_wtw - DEFAULT_JOINT_ANGLES_WTW) * self.obs_scales[
+            "dof_pos"
+        ]
         obs[30:42] = joint_vel_wtw * self.obs_scales["dof_vel"]
-        obs[42:54] = torch.clip(self.actions, -self.clip_actions, self.clip_actions).numpy()
+        obs[42:54] = torch.clip(
+            self.actions, -self.clip_actions, self.clip_actions
+        ).numpy()
         obs[54:66] = self.last_actions.numpy()
         obs[66:70] = self.get_clock_inputs(commands)
         return torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -159,11 +224,11 @@ class SportDirectController(WalkTheseWaysController):
 # ---------------------------------------------------------------------------
 class State:
     IDLE_CONNECTED = "idle_connected"  # settling after startup
-    STANDING       = "standing"        # WTW at zero velocity
-    STANDING_UP    = "standing_up"     # tanh transition → STAND_UP_POS
-    STANDING_DOWN  = "standing_down"   # tanh transition → STAND_DOWN_POS
-    WALKING        = "walking"         # WTW with velocity commands
-    DAMP           = "damp"            # motors off
+    STANDING = "standing"  # WTW at zero velocity
+    STANDING_UP = "standing_up"  # tanh transition → STAND_UP_POS
+    STANDING_DOWN = "standing_down"  # tanh transition → STAND_DOWN_POS
+    WALKING = "walking"  # WTW with velocity commands
+    DAMP = "damp"  # motors off
 
 
 # ---------------------------------------------------------------------------
@@ -178,22 +243,22 @@ class SportMuJoCoServer(Server):
     def __init__(self, controller: SportDirectController, num_motor: int):
         super().__init__(SPORT_SERVICE_NAME)
         self._controller = controller
-        self._num_motor  = num_motor
+        self._num_motor = num_motor
 
         self._lock = threading.Lock()
 
         # Shared state — written by RPC handlers, read by sim thread via tick()
-        self._state     = State.IDLE_CONNECTED
+        self._state = State.IDLE_CONNECTED
         self._vx = self._vy = self._vyaw = 0.0
 
         # Transition
         self._transition_start_step = 0
         self._transition_from = np.zeros(num_motor)
-        self._transition_to   = np.zeros(num_motor)
+        self._transition_to = np.zeros(num_motor)
 
         # Updated by tick() so RPC handlers can snapshot current joint pos
-        self._current_q  = np.zeros(num_motor)
-        self._sim_step   = 0
+        self._current_q = np.zeros(num_motor)
+        self._sim_step = 0
         self._idle_start_step = 0
 
         # Cached WTW output (ctrl order) — reused between WTW steps
@@ -203,26 +268,46 @@ class SportMuJoCoServer(Server):
     def Init(self):
         self._SetApiVersion(SPORT_API_VERSION)
 
-        self._RegistHandler(SPORT_API_ID_STANDUP,       self._handle_stand_up,   False)
-        self._RegistHandler(SPORT_API_ID_STANDDOWN,     self._handle_stand_down, False)
-        self._RegistHandler(SPORT_API_ID_MOVE,          self._handle_move,       False)
-        self._RegistHandler(SPORT_API_ID_STOPMOVE,      self._handle_stop_move,  False)
-        self._RegistHandler(SPORT_API_ID_DAMP,          self._handle_damp,       False)
-        self._RegistHandler(SPORT_API_ID_BALANCESTAND,  self._handle_stub,       False)
-        self._RegistHandler(SPORT_API_ID_RECOVERYSTAND, self._handle_stub,       False)
+        self._RegistHandler(SPORT_API_ID_STANDUP, self._handle_stand_up, False)
+        self._RegistHandler(SPORT_API_ID_STANDDOWN, self._handle_stand_down, False)
+        self._RegistHandler(SPORT_API_ID_MOVE, self._handle_move, False)
+        self._RegistHandler(SPORT_API_ID_STOPMOVE, self._handle_stop_move, False)
+        self._RegistHandler(SPORT_API_ID_DAMP, self._handle_damp, False)
+        self._RegistHandler(SPORT_API_ID_BALANCESTAND, self._handle_stub, False)
+        self._RegistHandler(SPORT_API_ID_RECOVERYSTAND, self._handle_stub, False)
 
         for api_id in [
-            SPORT_API_ID_EULER, SPORT_API_ID_SIT, SPORT_API_ID_RISESIT,
-            SPORT_API_ID_SPEEDLEVEL, SPORT_API_ID_HELLO, SPORT_API_ID_STRETCH,
-            SPORT_API_ID_CONTENT, SPORT_API_ID_DANCE1, SPORT_API_ID_DANCE2,
-            SPORT_API_ID_SWITCHJOYSTICK, SPORT_API_ID_POSE, SPORT_API_ID_SCRAPE,
-            SPORT_API_ID_FRONTFLIP, SPORT_API_ID_FRONTJUMP, SPORT_API_ID_FRONTPOUNCE,
-            SPORT_API_ID_HEART, SPORT_API_ID_STATICWALK, SPORT_API_ID_TROTRUN,
-            SPORT_API_ID_ECONOMICGAIT, SPORT_API_ID_LEFTFLIP, SPORT_API_ID_BACKFLIP,
-            SPORT_API_ID_HANDSTAND, SPORT_API_ID_FREEWALK, SPORT_API_ID_FREEBOUND,
-            SPORT_API_ID_FREEJUMP, SPORT_API_ID_FREEAVOID, SPORT_API_ID_CLASSICWALK,
-            SPORT_API_ID_WALKUPRIGHT, SPORT_API_ID_CROSSSTEP,
-            SPORT_API_ID_AUTORECOVERY_SET, SPORT_API_ID_AUTORECOVERY_GET,
+            SPORT_API_ID_EULER,
+            SPORT_API_ID_SIT,
+            SPORT_API_ID_RISESIT,
+            SPORT_API_ID_SPEEDLEVEL,
+            SPORT_API_ID_HELLO,
+            SPORT_API_ID_STRETCH,
+            SPORT_API_ID_CONTENT,
+            SPORT_API_ID_DANCE1,
+            SPORT_API_ID_DANCE2,
+            SPORT_API_ID_SWITCHJOYSTICK,
+            SPORT_API_ID_POSE,
+            SPORT_API_ID_SCRAPE,
+            SPORT_API_ID_FRONTFLIP,
+            SPORT_API_ID_FRONTJUMP,
+            SPORT_API_ID_FRONTPOUNCE,
+            SPORT_API_ID_HEART,
+            SPORT_API_ID_STATICWALK,
+            SPORT_API_ID_TROTRUN,
+            SPORT_API_ID_ECONOMICGAIT,
+            SPORT_API_ID_LEFTFLIP,
+            SPORT_API_ID_BACKFLIP,
+            SPORT_API_ID_HANDSTAND,
+            SPORT_API_ID_FREEWALK,
+            SPORT_API_ID_FREEBOUND,
+            SPORT_API_ID_FREEJUMP,
+            SPORT_API_ID_FREEAVOID,
+            SPORT_API_ID_CLASSICWALK,
+            SPORT_API_ID_WALKUPRIGHT,
+            SPORT_API_ID_CROSSSTEP,
+            SPORT_API_ID_AUTORECOVERY_SET,
+            SPORT_API_ID_AUTORECOVERY_GET,
             SPORT_API_ID_SWITCHAVOIDMODE,
         ]:
             self._RegistHandler(api_id, self._handle_not_impl, False)
@@ -231,7 +316,7 @@ class SportMuJoCoServer(Server):
     def _handle_stand_up(self, parameter: str):
         with self._lock:
             self._transition_from = self._current_q.copy()
-            self._transition_to   = STAND_UP_POS.copy()
+            self._transition_to = STAND_UP_POS.copy()
             self._transition_start_step = self._sim_step
             self._state = State.STANDING_UP
             self._controller.reset()
@@ -241,7 +326,7 @@ class SportMuJoCoServer(Server):
     def _handle_stand_down(self, parameter: str):
         with self._lock:
             self._transition_from = self._current_q.copy()
-            self._transition_to   = STAND_DOWN_POS.copy()
+            self._transition_to = STAND_DOWN_POS.copy()
             self._transition_start_step = self._sim_step
             self._state = State.STANDING_DOWN
             print("[sport_mujoco] StandDown")
@@ -250,11 +335,13 @@ class SportMuJoCoServer(Server):
     def _handle_move(self, parameter: str):
         p = json.loads(parameter)
         with self._lock:
-            self._vx   = float(p.get("x", 0.0))
-            self._vy   = float(p.get("y", 0.0))
+            self._vx = float(p.get("x", 0.0))
+            self._vy = float(p.get("y", 0.0))
             self._vyaw = float(p.get("z", 0.0))
             self._state = State.WALKING
-            print(f"[sport_mujoco] Move vx={self._vx:.2f} vy={self._vy:.2f} vyaw={self._vyaw:.2f}")
+            print(
+                f"[sport_mujoco] Move vx={self._vx:.2f} vy={self._vy:.2f} vyaw={self._vyaw:.2f}"
+            )
         return 0, ""
 
     def _handle_stop_move(self, parameter: str):
@@ -276,7 +363,9 @@ class SportMuJoCoServer(Server):
         return RPC_ERR_SERVER_API_NOT_IMPL, ""
 
     # ----------------------------------------- called by sim thread each step
-    def tick(self, sensordata: np.ndarray, num_motor: int, dim_motor_sensor: int) -> None:
+    def tick(
+        self, sensordata: np.ndarray, num_motor: int, dim_motor_sensor: int
+    ) -> None:
         """
         Compute and write mj_data.ctrl for the current physics step.
 
@@ -285,12 +374,12 @@ class SportMuJoCoServer(Server):
         Returns (ctrl_target, kp, kd) so the caller can apply them.
         """
         with self._lock:
-            step  = self._sim_step
+            step = self._sim_step
             state = self._state
             vx, vy, vyaw = self._vx, self._vy, self._vyaw
             t_start = self._transition_start_step
-            t_from  = self._transition_from
-            t_to    = self._transition_to
+            t_from = self._transition_from
+            t_to = self._transition_to
 
             # Keep current_q fresh so RPC handlers can snapshot it
             self._current_q = sensordata[:num_motor].copy()
@@ -312,13 +401,15 @@ class SportMuJoCoServer(Server):
 
         elif state in (State.STANDING_UP, State.STANDING_DOWN):
             elapsed = (step - t_start) * config.SIMULATE_DT
-            phase   = float(np.tanh(elapsed / TRANSITION_DURATION))
+            phase = float(np.tanh(elapsed / TRANSITION_DURATION))
             ctrl_target = (1.0 - phase) * t_from + phase * t_to
             kp = phase * 50.0 + (1.0 - phase) * 20.0
             if phase >= 0.99:
                 with self._lock:
                     self._state = (
-                        State.STANDING if state == State.STANDING_UP else State.IDLE_CONNECTED
+                        State.STANDING
+                        if state == State.STANDING_UP
+                        else State.IDLE_CONNECTED
                     )
                 print(f"[sport_mujoco] Transition done → {self._state}")
                 if state == State.STANDING_UP:
@@ -344,6 +435,7 @@ class SportMuJoCoServer(Server):
 # ---------------------------------------------------------------------------
 CAMERA_HZ = 30  # render rate (Hz)
 
+
 class VideoSimServer(Server):
     """Serves GetImageSample RPC with frames rendered from the MuJoCo camera."""
 
@@ -356,7 +448,9 @@ class VideoSimServer(Server):
 
     def Init(self):
         self._SetApiVersion(VIDEO_API_VERSION)
-        self._RegistBinaryHandler(VIDEO_API_ID_GETIMAGESAMPLE, self._handle_get_image, False)
+        self._RegistBinaryHandler(
+            VIDEO_API_ID_GETIMAGESAMPLE, self._handle_get_image, False
+        )
 
     def update_frame(self, jpeg_bytes: bytes):
         with self._lock:
@@ -373,9 +467,10 @@ def _load_scene(scene_path):
     Rewrites <include> paths and writes a temp file next to go2.xml so MuJoCo
     resolves meshdir and asset paths correctly."""
     scene_path = os.path.abspath(scene_path)
-    scene_dir  = os.path.dirname(scene_path)
-    go2_dir    = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "unitree_robots", "go2"))
+    scene_dir = os.path.dirname(scene_path)
+    go2_dir = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "unitree_robots", "go2")
+    )
 
     if scene_dir == go2_dir:
         return mujoco.MjModel.from_xml_path(scene_path)
@@ -400,28 +495,43 @@ def _load_scene(scene_path):
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Unified MuJoCo sim + WTW sport server")
+    parser = argparse.ArgumentParser(
+        description="Unified MuJoCo sim + WTW sport server"
+    )
     parser.add_argument("--interface", default=config.INTERFACE)
-    parser.add_argument("--domain",    default=config.DOMAIN_ID, type=int)
-    parser.add_argument("--scene",     default=config.ROBOT_SCENE,
-                        help="Path to MuJoCo scene XML (default: config.ROBOT_SCENE)")
-    parser.add_argument("--headless",  action="store_true", help="Run without viewer")
-    parser.add_argument("--record",    metavar="PATH",       default=None,
-                        help="Save spectator-view recording to PATH (e.g. run.mp4)")
-    parser.add_argument("--telemetry", metavar="PATH",       default=None,
-                        help="Write simulation state snapshots to PATH (JSON)")
+    parser.add_argument("--domain", default=config.DOMAIN_ID, type=int)
+    parser.add_argument(
+        "--scene",
+        default=config.ROBOT_SCENE,
+        help="Path to MuJoCo scene XML (default: config.ROBOT_SCENE)",
+    )
+    parser.add_argument("--headless", action="store_true", help="Run without viewer")
+    parser.add_argument(
+        "--record",
+        metavar="PATH",
+        default=None,
+        help="Save spectator-view recording to PATH (e.g. run.mp4)",
+    )
+    parser.add_argument(
+        "--telemetry",
+        metavar="PATH",
+        default=None,
+        help="Write simulation state snapshots to PATH (JSON)",
+    )
     _WTW_DIR = os.path.join(os.path.dirname(__file__), "wtw")
     parser.add_argument("--model-dir", default=_WTW_DIR)
-    parser.add_argument("--cfg-path",  default=os.path.join(_WTW_DIR, "parameters_cpu.pkl"))
+    parser.add_argument(
+        "--cfg-path", default=os.path.join(_WTW_DIR, "parameters_cpu.pkl")
+    )
     args = parser.parse_args()
 
     # --- MuJoCo setup -------------------------------------------------------
     mj_model = _load_scene(args.scene)
-    mj_data  = mujoco.MjData(mj_model)
+    mj_data = mujoco.MjData(mj_model)
     mujoco.mj_resetDataKeyframe(mj_model, mj_data, 0)
     mj_model.opt.timestep = config.SIMULATE_DT
 
-    num_motor        = mj_model.nu
+    num_motor = mj_model.nu
     dim_motor_sensor = 3 * num_motor  # q, dq, tau_est per motor
 
     # --- Controller + RPC servers -------------------------------------------
@@ -434,7 +544,9 @@ def main():
         camera_step_every = max(1, round(1.0 / (CAMERA_HZ * config.SIMULATE_DT)))
         video_server = VideoSimServer()
     else:
-        print("[sport_mujoco] WARNING: 'front_camera' not found in model — video API disabled")
+        print(
+            "[sport_mujoco] WARNING: 'front_camera' not found in model — video API disabled"
+        )
     # Renderer is created lazily on first _step() call so it shares the calling
     # thread's OpenGL/EGL context (creating it on the main thread and using it
     # from SimulationThread would cause context-mismatch → garbage frames).
@@ -445,14 +557,14 @@ def main():
     RECORD_W, RECORD_H = 1280, 720
     record_renderer: mujoco.Renderer | None = None
     record_ffmpeg = None  # subprocess.Popen piping raw RGB to ffmpeg
-    record_cam    = None  # MjvCamera tracking the robot
+    record_cam = None  # MjvCamera tracking the robot
     if args.record:
         record_cam = mujoco.MjvCamera()
-        record_cam.type       = mujoco.mjtCamera.mjCAMERA_TRACKING
+        record_cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
         record_cam.trackbodyid = mj_model.body("base_link").id
-        record_cam.distance   = 3.0
-        record_cam.elevation  = -30.0
-        record_cam.azimuth    = 135.0
+        record_cam.distance = 3.0
+        record_cam.elevation = -30.0
+        record_cam.azimuth = 135.0
         record_step_every = max(1, round(1.0 / (RECORD_HZ * config.SIMULATE_DT)))
         print(f"[sport_mujoco] Recording to {args.record} @ {RECORD_HZ} Hz")
 
@@ -471,11 +583,17 @@ def main():
         print(f"[sport_mujoco] Video RPC serving (front_camera @ {CAMERA_HZ} Hz)")
 
     # --- lowstate publisher (re-enables record_joints.py and other subscribers)
-    low_state     = LowState_default()
+    low_state = LowState_default()
     low_state_pub = ChannelPublisher("rt/lowstate", LowState_)
     low_state_pub.Init()
     print("[sport_mujoco] Serving sport RPC.")
     print(f"[sport_mujoco] WTW every {WTW_STEP_EVERY} steps → {WTW_HZ} Hz sim-time")
+
+    ### PUBLISHER SIM STATE ON DDS ###
+    time_publisher = ChannelPublisher("/sim/time", Time_)
+    time_publisher.Init()
+    tf_publisher = ChannelPublisher("/sim/tf", DDSTransform)
+    tf_publisher.Init()
 
     # --- Sim loop -----------------------------------------------------------
     _sim_step_count = 0
@@ -489,29 +607,47 @@ def main():
             print("[sport_mujoco] Camera renderer initialised on sim thread.")
         if args.record and record_renderer is None:
             record_renderer = mujoco.Renderer(mj_model, height=RECORD_H, width=RECORD_W)
-            record_ffmpeg = __import__("subprocess").Popen([
-                "ffmpeg", "-y",
-                "-f", "rawvideo", "-vcodec", "rawvideo",
-                "-s", f"{RECORD_W}x{RECORD_H}",
-                "-pix_fmt", "rgb24",
-                "-r", str(RECORD_HZ),
-                "-i", "pipe:",
-                "-vcodec", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-preset", "fast",
-                "-movflags", "+faststart",
-                args.record,
-            ], stdin=__import__("subprocess").PIPE, stderr=__import__("subprocess").DEVNULL)
+            record_ffmpeg = __import__("subprocess").Popen(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "rawvideo",
+                    "-vcodec",
+                    "rawvideo",
+                    "-s",
+                    f"{RECORD_W}x{RECORD_H}",
+                    "-pix_fmt",
+                    "rgb24",
+                    "-r",
+                    str(RECORD_HZ),
+                    "-i",
+                    "pipe:",
+                    "-vcodec",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-preset",
+                    "fast",
+                    "-movflags",
+                    "+faststart",
+                    args.record,
+                ],
+                stdin=__import__("subprocess").PIPE,
+                stderr=__import__("subprocess").DEVNULL,
+            )
             print(f"[sport_mujoco] Record renderer initialised on sim thread.")
-        ctrl_target, kp, kd = server.tick(mj_data.sensordata, num_motor, dim_motor_sensor)
+        ctrl_target, kp, kd = server.tick(
+            mj_data.sensordata, num_motor, dim_motor_sensor
+        )
         for i in range(num_motor):
-            q  = mj_data.sensordata[i]
+            q = mj_data.sensordata[i]
             dq = mj_data.sensordata[num_motor + i]
             mj_data.ctrl[i] = kp * (ctrl_target[i] - q) + kd * (-dq)
         mujoco.mj_step(mj_model, mj_data)
         for i in range(num_motor):
-            low_state.motor_state[i].q       = mj_data.sensordata[i]
-            low_state.motor_state[i].dq      = mj_data.sensordata[num_motor + i]
+            low_state.motor_state[i].q = mj_data.sensordata[i]
+            low_state.motor_state[i].dq = mj_data.sensordata[num_motor + i]
             low_state.motor_state[i].tau_est = mj_data.sensordata[2 * num_motor + i]
         low_state.imu_state.quaternion[0] = mj_data.sensordata[dim_motor_sensor]
         low_state.imu_state.quaternion[1] = mj_data.sensordata[dim_motor_sensor + 1]
@@ -531,12 +667,21 @@ def main():
             if ok:
                 jpeg_bytes = jpeg.tobytes()
                 if _sim_step_count == 0:  # save very first frame for inspection
-                    cv2.imwrite("/tmp/sport_mujoco_frame0.jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-                    print(f"[camera] first frame: shape={rgb.shape} dtype={rgb.dtype} "
-                          f"min={rgb.min()} max={rgb.max()} mean={rgb.mean():.1f} "
-                          f"JPEG={len(jpeg_bytes)} bytes → /tmp/sport_mujoco_frame0.jpg")
+                    cv2.imwrite(
+                        "/tmp/sport_mujoco_frame0.jpg",
+                        cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+                    )
+                    print(
+                        f"[camera] first frame: shape={rgb.shape} dtype={rgb.dtype} "
+                        f"min={rgb.min()} max={rgb.max()} mean={rgb.mean():.1f} "
+                        f"JPEG={len(jpeg_bytes)} bytes → /tmp/sport_mujoco_frame0.jpg"
+                    )
                 video_server.update_frame(jpeg_bytes)
-        if args.record and record_ffmpeg is not None and _sim_step_count % record_step_every == 0:
+        if (
+            args.record
+            and record_ffmpeg is not None
+            and _sim_step_count % record_step_every == 0
+        ):
             record_renderer.update_scene(mj_data, camera=record_cam)
             frame = record_renderer.render()
             if frame.dtype != np.uint8:
@@ -549,13 +694,42 @@ def main():
                 pass
         if telemetry_file is not None and _sim_step_count % telemetry_step_every == 0:
             import json as _json
+
             snapshot = {
-                "t":    round(mj_data.time, 4),
+                "t": round(mj_data.time, 4),
                 "qpos": mj_data.qpos.tolist(),
                 "qvel": mj_data.qvel.tolist(),
             }
             telemetry_file.write(_json.dumps(snapshot) + "\n")
             telemetry_file.flush()
+
+        ### SENDING SIM STATE ON DDS ###
+        time = Time_(
+            int(np.floor(mj_data.time)),
+            int((mj_data.time - np.floor(mj_data.time)) * 1e9),
+        )
+        # pprint(dir(mj_data))
+        # pprint((mj_data.body[0]))
+        for i in range(mj_model.nbody):
+            name = mj_model.body(i).name
+            pos = mj_data.xpos[i]  # world position of body frame
+            xmat = mj_data.xmat[i]  # world orientation matrix, flattened 3x3
+            # print(name, pos, xmat)
+            tf_publisher.Write(
+                DDSTransform(
+                    frame=name,
+                    parent="world",
+                    time=time,
+                    x=float(pos[0]),
+                    y=float(pos[1]),
+                    z=float(pos[2]),
+                    mat=xmat.tolist(),
+                )
+            )
+        # pose_publisher.Write(DDSTransform(*mj_data.qpos.tolist()))
+        # vel_publisher.Write(DDSTransform(*mj_data.qvel.tolist()))
+        time_publisher.Write(time)
+
         _sim_step_count += 1
 
     try:
@@ -587,7 +761,7 @@ def main():
                         viewer.sync()
                     time.sleep(config.VIEWER_DT)
 
-            sim_thread    = Thread(target=SimulationThread,    daemon=True)
+            sim_thread = Thread(target=SimulationThread, daemon=True)
             viewer_thread = Thread(target=PhysicsViewerThread, daemon=True)
             sim_thread.start()
             viewer_thread.start()
