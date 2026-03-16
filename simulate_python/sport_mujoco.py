@@ -408,6 +408,8 @@ def main():
     parser.add_argument("--headless",  action="store_true", help="Run without viewer")
     parser.add_argument("--record",    metavar="PATH",       default=None,
                         help="Save spectator-view recording to PATH (e.g. run.mp4)")
+    parser.add_argument("--telemetry", metavar="PATH",       default=None,
+                        help="Write simulation state snapshots to PATH (JSON)")
     _WTW_DIR = os.path.join(os.path.dirname(__file__), "wtw")
     parser.add_argument("--model-dir", default=_WTW_DIR)
     parser.add_argument("--cfg-path",  default=os.path.join(_WTW_DIR, "parameters_cpu.pkl"))
@@ -453,6 +455,11 @@ def main():
         record_cam.azimuth    = 135.0
         record_step_every = max(1, round(1.0 / (RECORD_HZ * config.SIMULATE_DT)))
         print(f"[sport_mujoco] Recording to {args.record} @ {RECORD_HZ} Hz")
+
+    # --- Telemetry setup ----------------------------------------------------
+    TELEMETRY_HZ = 10  # snapshots per simulated second
+    telemetry_step_every = max(1, round(1.0 / (TELEMETRY_HZ * config.SIMULATE_DT)))
+    telemetry_file = open(args.telemetry, "w") if args.telemetry else None
 
     print(f"[sport_mujoco] DDS domain={args.domain} interface={args.interface}")
     ChannelFactoryInitialize(args.domain, args.interface)
@@ -536,7 +543,19 @@ def main():
                 frame = (np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)
             if frame.ndim == 3 and frame.shape[2] == 4:
                 frame = frame[:, :, :3]
-            record_ffmpeg.stdin.write(frame.tobytes())
+            try:
+                record_ffmpeg.stdin.write(frame.tobytes())
+            except (ValueError, BrokenPipeError):
+                pass
+        if telemetry_file is not None and _sim_step_count % telemetry_step_every == 0:
+            import json as _json
+            snapshot = {
+                "t":    round(mj_data.time, 4),
+                "qpos": mj_data.qpos.tolist(),
+                "qvel": mj_data.qvel.tolist(),
+            }
+            telemetry_file.write(_json.dumps(snapshot) + "\n")
+            telemetry_file.flush()
         _sim_step_count += 1
 
     try:
@@ -574,6 +593,9 @@ def main():
             viewer_thread.start()
             sim_thread.join()
     finally:
+        if telemetry_file is not None:
+            telemetry_file.close()
+            print(f"[sport_mujoco] Telemetry saved: {args.telemetry}")
         if record_ffmpeg is not None:
             record_ffmpeg.stdin.close()
             record_ffmpeg.wait()
