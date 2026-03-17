@@ -145,6 +145,11 @@ class DDSTransform(idl.IdlStruct):
     z: float = 0
     mat: idl.types.array[float, 9] = field(default_factory=lambda *_: [0.0] * 9)
 
+@dataclass
+class DDSTransformBatch(idl.IdlStruct):
+    tf_batch : idl.types.sequence[DDSTransform]
+
+
 
 # ---------------------------------------------------------------------------
 # WTW controller — reads directly from MuJoCo sensordata
@@ -592,7 +597,7 @@ def main():
     ### PUBLISHER SIM STATE ON DDS ###
     time_publisher = ChannelPublisher("/sim/time", Time_)
     time_publisher.Init()
-    tf_publisher = ChannelPublisher("/sim/tf", DDSTransform)
+    tf_publisher = ChannelPublisher("/sim/tf", DDSTransformBatch)
     tf_publisher.Init()
 
     # --- Sim loop -----------------------------------------------------------
@@ -710,13 +715,13 @@ def main():
         )
         # pprint(dir(mj_data))
         # pprint((mj_data.body[0]))
+        tf_list: list[DDSTransform] = []
         for i in range(mj_model.nbody):
             name = mj_model.body(i).name
             pos = mj_data.xpos[i]  # world position of body frame
             xmat = mj_data.xmat[i]  # world orientation matrix, flattened 3x3
             # print(name, pos, xmat)
-            tf_publisher.Write(
-                DDSTransform(
+            tf_list.append(DDSTransform(
                     frame=name,
                     parent="world",
                     time=time,
@@ -724,7 +729,8 @@ def main():
                     y=float(pos[1]),
                     z=float(pos[2]),
                     mat=xmat.tolist(),
-                )
+                ))
+        tf_publisher.Write(DDSTransformBatch(tf_list)
             )
         # pose_publisher.Write(DDSTransform(*mj_data.qpos.tolist()))
         # vel_publisher.Write(DDSTransform(*mj_data.qvel.tolist()))
