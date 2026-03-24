@@ -35,7 +35,7 @@ class HeightMapPublisher:
         self._down = np.array([0.0, 0.0, -1.0])
         self._debug = debug
         self._debug_data = None
-        self._debug_origin = None
+        self._debug_xy = None
         self._debug_ray_z = 0.0
         self._debug_logged = False
         if debug:
@@ -58,33 +58,48 @@ class HeightMapPublisher:
         robot_pos = self._d.xpos[self._body_id]
         robot_xy = robot_pos[:2]
         ray_z = robot_pos[2] + self._source_offset
-        half_extent = 0.5 * np.array([self.width, self.height]) * self.resolution
-        origin = robot_xy - half_extent
+
+        # Extract yaw from body quaternion (w, x, y, z)
+        quat = self._d.xquat[self._body_id]
+        yaw = np.arctan2(2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
+                         1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2))
+        cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+
+        half_w = 0.5 * self.width * self.resolution
+        half_h = 0.5 * self.height * self.resolution
 
         data = np.full(self.width * self.height, EMPTY, dtype=np.float32)
         pnt = np.array([0.0, 0.0, ray_z])
         geomid_buf = self._geomid_buf if self._debug else None
         elevated_geoms = set() if (self._debug and not self._debug_logged) else None
+        if self._debug:
+            xy_positions = np.empty((self.width * self.height, 2), dtype=np.float64)
 
         for iy in range(self.height):
-            pnt[1] = origin[1] + iy * self.resolution
+            local_y = -half_h + iy * self.resolution
             for ix in range(self.width):
-                pnt[0] = origin[0] + ix * self.resolution
+                local_x = -half_w + ix * self.resolution
+                # Rotate local offset by robot yaw
+                pnt[0] = robot_xy[0] + cos_y * local_x - sin_y * local_y
+                pnt[1] = robot_xy[1] + sin_y * local_x + cos_y * local_y
                 if geomid_buf is not None:
                     geomid_buf[0] = -1
                 dist = mujoco.mj_ray(
                     self._m, self._d, pnt, self._down,
                     self._geomgroup, 1, -1, geomid_buf, None,
                 )
+                idx = self.width * iy + ix
+                if self._debug:
+                    xy_positions[idx] = [pnt[0], pnt[1]]
                 if dist >= 0:
                     h = ray_z - dist
-                    data[self.width * iy + ix] = h
+                    data[idx] = h
                     if elevated_geoms is not None and h > 0.01:
                         elevated_geoms.add(int(geomid_buf[0]))
 
         if self._debug:
             self._debug_data = data.copy()
-            self._debug_origin = origin.copy()
+            self._debug_xy = xy_positions
             self._debug_ray_z = ray_z
 
         if elevated_geoms:
@@ -98,7 +113,7 @@ class HeightMapPublisher:
                 print(f"  geom[{gid}] name={name!r} body={body_name!r} group={group}")
 
         self._msg.stamp = self._d.time
-        self._msg.origin = [float(origin[0]), float(origin[1])]
+        self._msg.origin = [float(robot_xy[0]), float(robot_xy[1])]
         self._msg.data = data.tolist()
         self._pub.Write(self._msg)
 
@@ -111,7 +126,7 @@ class HeightMapPublisher:
         if self._debug_data is None:
             return
         data = self._debug_data
-        origin = self._debug_origin
+        xy = self._debug_xy
         ray_z = self._debug_ray_z
 
         for iy in range(0, self.height, stride):
@@ -122,8 +137,7 @@ class HeightMapPublisher:
                 h = data[idx]
                 if h >= EMPTY:
                     continue
-                x = origin[0] + ix * self.resolution
-                y = origin[1] + iy * self.resolution
+                x, y = xy[idx]
                 t = min(max(h, 0.0) / 1.0, 1.0)
                 mujoco.mjv_connector(
                     scn.geoms[scn.ngeom],
