@@ -413,7 +413,15 @@ def main():
     _WTW_DIR = os.path.join(os.path.dirname(__file__), "wtw")
     parser.add_argument("--model-dir", default=_WTW_DIR)
     parser.add_argument("--cfg-path",  default=os.path.join(_WTW_DIR, "parameters_cpu.pkl"))
+    parser.add_argument("--heightmap", action="store_true",
+                        help="Publish HeightMap_ DDS messages via ray casting")
+    parser.add_argument("--heightmap-hz", type=float, default=10.0,
+                        help="Height map publish rate in sim-time Hz (default: 10)")
+    parser.add_argument("--heightmap-debug", action="store_true",
+                        help="Visualise height map rays in the viewer and log hit geoms")
     args = parser.parse_args()
+    if args.heightmap_debug:
+        args.heightmap = True
 
     # --- MuJoCo setup -------------------------------------------------------
     mj_model = _load_scene(args.scene)
@@ -474,6 +482,13 @@ def main():
     low_state     = LowState_default()
     low_state_pub = ChannelPublisher("rt/lowstate", LowState_)
     low_state_pub.Init()
+    # --- height map publisher (opt-in) --------------------------------------
+    heightmap_pub = None
+    if args.heightmap:
+        from heightmap_publisher import HeightMapPublisher
+        heightmap_pub = HeightMapPublisher(mj_model, mj_data, debug=args.heightmap_debug)
+        heightmap_step_every = max(1, round(1.0 / (args.heightmap_hz * config.SIMULATE_DT)))
+
     print("[sport_mujoco] Serving sport RPC.")
     print(f"[sport_mujoco] WTW every {WTW_STEP_EVERY} steps → {WTW_HZ} Hz sim-time")
 
@@ -556,6 +571,8 @@ def main():
             }
             telemetry_file.write(_json.dumps(snapshot) + "\n")
             telemetry_file.flush()
+        if heightmap_pub is not None and _sim_step_count % heightmap_step_every == 0:
+            heightmap_pub.update()
         _sim_step_count += 1
 
     try:
@@ -584,6 +601,8 @@ def main():
             def PhysicsViewerThread():
                 while viewer.is_running():
                     with locker:
+                        if heightmap_pub is not None and heightmap_pub._debug:
+                            heightmap_pub.draw_debug(viewer.user_scn)
                         viewer.sync()
                     time.sleep(config.VIEWER_DT)
 
