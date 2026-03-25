@@ -22,9 +22,17 @@ class HeightMapPublisher:
     The default parameters match the Go2 API based on: https://support.unitree.com/home/en/developer/LiDAR_service#heading-6
     """
 
-    def __init__(self, mj_model, mj_data, robot_body="base_link",
-                 width=128, height=128, resolution=0.06, source_offset=1.0,
-                 debug=False):
+    def __init__(
+        self,
+        mj_model,
+        mj_data,
+        robot_body="base_link",
+        width=128,
+        height=128,
+        resolution=0.06,
+        source_offset=1.0,
+        debug=False,
+    ):
         self._m = mj_model
         self._d = mj_data
         self._body_id = mj_model.body(robot_body).id
@@ -61,8 +69,10 @@ class HeightMapPublisher:
 
         # Extract yaw from body quaternion (w, x, y, z)
         quat = self._d.xquat[self._body_id]
-        yaw = np.arctan2(2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
-                         1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2))
+        yaw = np.arctan2(
+            2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
+            1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2),
+        )
         cos_y, sin_y = np.cos(yaw), np.sin(yaw)
 
         half_w = 0.5 * self.width * self.resolution
@@ -85,8 +95,15 @@ class HeightMapPublisher:
                 if geomid_buf is not None:
                     geomid_buf[0] = -1
                 dist = mujoco.mj_ray(
-                    self._m, self._d, pnt, self._down,
-                    self._geomgroup, 1, -1, geomid_buf, None,
+                    self._m,
+                    self._d,
+                    pnt,
+                    self._down,
+                    self._geomgroup,
+                    1,
+                    -1,
+                    geomid_buf,
+                    None,
                 )
                 idx = self.width * iy + ix
                 if self._debug:
@@ -106,9 +123,15 @@ class HeightMapPublisher:
             self._debug_logged = True
             print(f"[heightmap] DEBUG: {len(elevated_geoms)} geom(s) hit above ground:")
             for gid in sorted(elevated_geoms):
-                name = mujoco.mj_id2name(self._m, mujoco.mjtObj.mjOBJ_GEOM, gid) or f"<unnamed:{gid}>"
+                name = (
+                    mujoco.mj_id2name(self._m, mujoco.mjtObj.mjOBJ_GEOM, gid)
+                    or f"<unnamed:{gid}>"
+                )
                 body_id = self._m.geom_bodyid[gid]
-                body_name = mujoco.mj_id2name(self._m, mujoco.mjtObj.mjOBJ_BODY, body_id) or f"<unnamed:{body_id}>"
+                body_name = (
+                    mujoco.mj_id2name(self._m, mujoco.mjtObj.mjOBJ_BODY, body_id)
+                    or f"<unnamed:{body_id}>"
+                )
                 group = self._m.geom_group[gid]
                 print(f"  geom[{gid}] name={name!r} body={body_name!r} group={group}")
 
