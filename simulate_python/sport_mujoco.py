@@ -33,9 +33,8 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src", "unitree_sdk2_python"))
 
 import xml.etree.ElementTree as ET
 import cv2
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Pose_
 from unitree_sdk2py.idl.default import (
     unitree_go_msg_dds__LowState_ as LowState_default,
 )
@@ -422,6 +421,10 @@ def main():
                         help="Height map publish rate in sim-time Hz (default: 10)")
     parser.add_argument("--heightmap-debug", action="store_true",
                         help="Visualise height map rays in the viewer and log hit geoms")
+    parser.add_argument("--uwb", action="store_true",
+                        help="Publish UwbState_ DDS messages (requires 'human_marker' body)")
+    parser.add_argument("--uwb-hz", type=float, default=10.0,
+                        help="UWB publish rate in sim-time Hz (default: 10)")
     parser.add_argument("--keyframe", default=None,
                         help="Name of keyframe to reset to (default: first keyframe)")
     args = parser.parse_args()
@@ -496,18 +499,16 @@ def main():
     # --- highstate publisher (position, velocity, IMU for go2_rails_demo) ---
     from highstate_publisher import HighStatePublisher
     highstate_pub = HighStatePublisher(num_motor)
-    # --- human marker subscriber -------------------------------------------
-    _marker_pose = None
-    _marker_lock = threading.Lock()
-    has_marker = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "human_marker") >= 0
-    if has_marker:
-        def _on_marker_pose(msg):
-            nonlocal _marker_pose
-            with _marker_lock:
-                _marker_pose = msg
-        _marker_sub = ChannelSubscriber("rt/human_marker_pose", Pose_)
-        _marker_sub.Init(_on_marker_pose, 10)
-        print("[sport_mujoco] Subscribed to rt/human_marker_pose")
+    # --- UWB publisher (opt-in) ---------------------------------------------
+    uwb_pub = None
+    if args.uwb:
+        has_marker = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "human_marker") >= 0
+        if has_marker:
+            from uwb_publisher import UwbPublisher
+            uwb_pub = UwbPublisher(mj_model, mj_data)
+            uwb_step_every = max(1, round(1.0 / (args.uwb_hz * config.SIMULATE_DT)))
+        else:
+            print("[sport_mujoco] WARNING: --uwb requested but 'human_marker' body not found")
 
     # --- height map publisher (opt-in) --------------------------------------
     heightmap_pub = None
@@ -551,14 +552,8 @@ def main():
             dq = mj_data.sensordata[num_motor + i]
             mj_data.ctrl[i] = kp * (ctrl_target[i] - q) + kd * (-dq)
         mujoco.mj_step(mj_model, mj_data)
-        if has_marker:
-            with _marker_lock:
-                p = _marker_pose
-            if p is not None:
-                mid = mj_model.body("human_marker").mocapid[0]
-                mj_data.mocap_pos[mid] = [p.position.x, p.position.y, p.position.z]
-                mj_data.mocap_quat[mid] = [p.orientation.w, p.orientation.x,
-                                           p.orientation.y, p.orientation.z]
+        if uwb_pub is not None and _sim_step_count % uwb_step_every == 0:
+            uwb_pub.update()
         for i in range(num_motor):
             low_state.motor_state[i].q       = mj_data.sensordata[i]
             low_state.motor_state[i].dq      = mj_data.sensordata[num_motor + i]
