@@ -67,16 +67,19 @@ class HeightMapPublisher:
         robot_xy = robot_pos[:2]
         ray_z = robot_pos[2] + self._source_offset
 
-        # Extract yaw from body quaternion (w, x, y, z)
-        quat = self._d.xquat[self._body_id]
-        yaw = np.arctan2(
-            2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
-            1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2),
-        )
-        cos_y, sin_y = np.cos(yaw), np.sin(yaw)
-
         half_w = 0.5 * self.width * self.resolution
         half_h = 0.5 * self.height * self.resolution
+
+        # From HeightMap_.idl:
+        #   origin[2]  -- "Map frame origin xy-position [m]"
+        #              -- "the xyz-axis direction of map frame is aligned with the world frame"
+        #   "For a cell whose 2d-array-index is [ix, iy],
+        #    its position in world frame is: [origin[0] + ix * resolution, origin[1] + iy * resolution]"
+        #
+        # So origin is the world-frame position of cell [0,0] (the grid corner),
+        # and the grid axes are axis-aligned with the world frame (no yaw rotation).
+        origin_x = robot_xy[0] - half_w
+        origin_y = robot_xy[1] - half_h
 
         data = np.full(self.width * self.height, EMPTY, dtype=np.float32)
         pnt = np.array([0.0, 0.0, ray_z])
@@ -86,12 +89,9 @@ class HeightMapPublisher:
             xy_positions = np.empty((self.width * self.height, 2), dtype=np.float64)
 
         for iy in range(self.height):
-            local_y = -half_h + iy * self.resolution
             for ix in range(self.width):
-                local_x = -half_w + ix * self.resolution
-                # Rotate local offset by robot yaw
-                pnt[0] = robot_xy[0] + cos_y * local_x - sin_y * local_y
-                pnt[1] = robot_xy[1] + sin_y * local_x + cos_y * local_y
+                pnt[0] = origin_x + ix * self.resolution
+                pnt[1] = origin_y + iy * self.resolution
                 if geomid_buf is not None:
                     geomid_buf[0] = -1
                 dist = mujoco.mj_ray(
@@ -136,7 +136,7 @@ class HeightMapPublisher:
                 print(f"  geom[{gid}] name={name!r} body={body_name!r} group={group}")
 
         self._msg.stamp = self._d.time
-        self._msg.origin = [float(robot_xy[0]), float(robot_xy[1])]
+        self._msg.origin = [float(origin_x), float(origin_y)]
         self._msg.data = data.tolist()
         self._pub.Write(self._msg)
 
