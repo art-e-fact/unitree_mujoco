@@ -336,7 +336,7 @@ def main():
     parser.add_argument("--heightmap-debug", action="store_true",
                         help="Visualise height map rays in the viewer and log hit geoms")
     parser.add_argument("--uwb", action="store_true",
-                        help="Publish UwbState_ DDS messages (requires 'human_marker' body)")
+                        help="Publish UwbState_ DDS messages (requires 'uwb_tag' body)")
     parser.add_argument("--uwb-hz", type=float, default=10.0,
                         help="UWB publish rate in sim-time Hz (default: 10)")
     parser.add_argument("--keyframe", default=None,
@@ -418,13 +418,13 @@ def main():
     # --- UWB publisher (opt-in) ---------------------------------------------
     uwb_pub = None
     if args.uwb:
-        has_marker = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "human_marker") >= 0
+        has_marker = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "uwb_tag") >= 0
         if has_marker:
             from uwb_publisher import UwbPublisher
             uwb_pub = UwbPublisher(mj_model, mj_data)
             uwb_step_every = max(1, round(1.0 / (args.uwb_hz * config.SIMULATE_DT)))
         else:
-            print("[sport_mujoco] WARNING: --uwb requested but 'human_marker' body not found")
+            print("[sport_mujoco] WARNING: --uwb requested but 'uwb_tag' body not found")
 
     # --- height map publisher (opt-in) --------------------------------------
     heightmap_pub = None

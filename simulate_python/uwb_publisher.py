@@ -1,10 +1,10 @@
 """Publish simulated UwbState_ DDS messages from a MuJoCo mocap body.
 
-Maps a "human_marker" mocap body (the UWB tag/label) and the robot
+Maps a "uwb_tag" mocap body (the UWB tag/label) and the robot
 "base_link" body (the UWB base station) into the UwbState_ spherical-
 coordinate convention used by the real Go2 UWB module.
 
-Also subscribes to ``rt/human_marker_pose`` so external code can
+Also subscribes to ``rt/uwb_tag_pose`` so external code can
 reposition the tag at runtime (e.g. a pursuit controller publishing
 a Pose_ message).
 
@@ -20,7 +20,7 @@ from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Pose_
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__UwbState_
 
 TOPIC_UWB = "rt/uwbstate"
-TOPIC_POSE = "rt/human_marker_pose"
+TOPIC_POSE = "rt/uwb_tag_pose"
 
 
 def _quat_to_euler(w, x, y, z):
@@ -35,16 +35,16 @@ class UwbPublisher:
     """Simulate the Go2 UWB module using two MuJoCo bodies.
 
     * **base** = robot body (``base_link``) — the UWB base station.
-    * **tag**  = mocap body (``human_marker``) — the UWB tag/label.
+    * **tag**  = mocap body (``uwb_tag``) — the UWB tag/label.
 
     Each ``update()`` call:
-    1. Applies any pending ``Pose_`` from ``rt/human_marker_pose`` to the
+    1. Applies any pending ``Pose_`` from ``rt/uwb_tag_pose`` to the
        mocap body (so external code can move the tag).
     2. Reads both body poses from ``mj_data``.
     3. Computes UWB spherical coordinates and publishes ``UwbState_``.
     """
 
-    def __init__(self, mj_model, mj_data, robot_body="base_link", marker_body="human_marker"):
+    def __init__(self, mj_model, mj_data, robot_body="base_link", marker_body="uwb_tag"):
         self._m = mj_model
         self._d = mj_data
 
