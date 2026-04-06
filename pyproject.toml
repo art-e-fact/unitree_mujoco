@@ -13,19 +13,15 @@ dependencies = [
 ]
 
 [project.scripts]
-sport-mujoco = "unitree_mujoco.sport_mujoco:main"
+sport-mujoco = "unitree_mujoco.simulate_python.sport_mujoco:main"
 
 [tool.setuptools]
-package-dir = {"unitree_mujoco" = "simulate_python"}
-packages = ["unitree_mujoco"]
+package-dir = {"unitree_mujoco" = "."}
+packages = ["unitree_mujoco", "unitree_mujoco.simulate_python"]
 
 [tool.setuptools.package-data]
 unitree_mujoco = [
-    "wtw/**/*",
-    "policies/**/*",
+    "simulate_python/wtw/**/*",
+    "simulate_python/policies/**/*",
+    "unitree_robots/**/*",
 ]
-
-# unitree_robots/ (meshes, XMLs) is resolved at runtime via __file__-relative
-# paths in config.py and sport_mujoco.py.  For editable / path installs this
-# works as-is.  For non-editable installs from git, add a MANIFEST.in that
-# includes unitree_robots/.
