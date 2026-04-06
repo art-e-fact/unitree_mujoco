@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import yaml
 
-from locomotion_policy import LocomotionPolicy
+from .locomotion_policy import LocomotionPolicy
 
 # Joint order mapping between Isaac Lab and MuJoCo.
 #

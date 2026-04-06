@@ -5,8 +5,8 @@ import os
 import numpy as np
 import torch
 
-from locomotion_policy import LocomotionPolicy
-from wtw_controller import (
+from .locomotion_policy import LocomotionPolicy
+from .wtw_controller import (
     DEFAULT_JOINT_ANGLES_WTW,
     WTW_TO_MUJOCO_CTRL,
     WalkTheseWaysController,

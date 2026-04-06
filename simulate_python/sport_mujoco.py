@@ -22,13 +22,11 @@ import json
 import time
 import threading
 import argparse
+import tempfile
 import numpy as np
 import mujoco
 import mujoco.viewer
 from threading import Thread
-
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src", "unitree_sdk2_python"))
 
 import xml.etree.ElementTree as ET
 import cv2
@@ -60,7 +58,7 @@ from unitree_sdk2py.go2.sport.sport_api import (
     SPORT_API_ID_SWITCHAVOIDMODE,
 )
 
-import config
+from . import config
 
 STAND_DOWN_POS = np.array([
      0.0473455,  1.22187, -2.44375,   # FR
@@ -304,13 +302,20 @@ def _load_scene(scene_path):
         if rel and not os.path.isabs(rel):
             elem.set("file", os.path.normpath(os.path.join(scene_dir, rel)))
 
-    tmp = os.path.join(go2_dir, "_tmp_scene.xml")
+    tmp_dir = tempfile.mkdtemp(prefix="sport_mujoco_")
+    tmp = os.path.join(tmp_dir, "_tmp_scene.xml")
+    # Symlink the go2 assets so MuJoCo can resolve meshdir relative paths.
+    for name in os.listdir(go2_dir):
+        src = os.path.join(go2_dir, name)
+        dst = os.path.join(tmp_dir, name)
+        if not os.path.exists(dst):
+            os.symlink(src, dst)
     try:
         tree.write(tmp, encoding="unicode", xml_declaration=False)
         return mujoco.MjModel.from_xml_path(tmp)
     finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -362,10 +367,10 @@ def main():
 
     # --- Policy + RPC servers ------------------------------------------------
     if args.policy == "wtw":
-        from wtw_policy import WtwPolicy
+        from .wtw_policy import WtwPolicy
         policy = WtwPolicy(num_motor)
     else:
-        from rsl_rl_policy import RslRlPolicy
+        from .rsl_rl_policy import RslRlPolicy
         policy = RslRlPolicy(mj_model, mj_data, num_motor)
     server = SportMuJoCoServer(policy, num_motor)
 
@@ -420,7 +425,7 @@ def main():
     if args.uwb:
         has_marker = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "uwb_tag") >= 0
         if has_marker:
-            from uwb_publisher import UwbPublisher
+            from .uwb_publisher import UwbPublisher
             uwb_pub = UwbPublisher(mj_model, mj_data)
             uwb_step_every = max(1, round(1.0 / (args.uwb_hz * config.SIMULATE_DT)))
         else:
@@ -429,7 +434,7 @@ def main():
     # --- height map publisher (opt-in) --------------------------------------
     heightmap_pub = None
     if args.heightmap:
-        from heightmap_publisher import HeightMapPublisher
+        from .heightmap_publisher import HeightMapPublisher
         heightmap_pub = HeightMapPublisher(mj_model, mj_data, debug=args.heightmap_debug)
         heightmap_step_every = max(1, round(1.0 / (args.heightmap_hz * config.SIMULATE_DT)))
 
