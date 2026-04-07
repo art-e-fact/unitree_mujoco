@@ -1,11 +1,10 @@
 """Walk-These-Ways locomotion policy for MuJoCo."""
 
-import os
-
 import numpy as np
 import torch
 
 from .locomotion_policy import LocomotionPolicy
+from .policy_assets import get_wtw_assets
 from .wtw_controller import (
     DEFAULT_JOINT_ANGLES_WTW,
     WTW_TO_MUJOCO_CTRL,
@@ -73,15 +72,12 @@ class _DirectController(WalkTheseWaysController):
         obs[66:70] = self.get_clock_inputs(commands)
         return torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
 
-
-_WTW_DIR = os.path.join(os.path.dirname(__file__), "wtw")
-
-
 class WtwPolicy(LocomotionPolicy):
     """Walk-These-Ways policy wrapper implementing LocomotionPolicy."""
 
     def __init__(self, num_motor: int = 12):
-        self._ctrl = _DirectController(_WTW_DIR, os.path.join(_WTW_DIR, "parameters_cpu.pkl"))
+        model_dir, cfg_path = get_wtw_assets()
+        self._ctrl = _DirectController(str(model_dir), str(cfg_path))
         self._num_motor = num_motor
         self._dim_motor_sensor = 3 * num_motor
 

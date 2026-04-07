@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Unitree MuJoCo simulation with sport RPC server"
 requires-python = ">=3.11"
 dependencies = [
+    "huggingface_hub>=0.32.0",
     "mujoco>=3.6.0",
     "numpy",
     "opencv-python",
@@ -21,7 +22,5 @@ packages = ["unitree_mujoco", "unitree_mujoco.simulate_python"]
 
 [tool.setuptools.package-data]
 unitree_mujoco = [
-    "simulate_python/wtw/**/*",
-    "simulate_python/policies/**/*",
     "unitree_robots/**/*",
 ]

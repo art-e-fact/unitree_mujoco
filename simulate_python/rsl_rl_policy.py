@@ -1,13 +1,12 @@
 """RSL-RL locomotion policy with MuJoCo height scanning."""
 
-from pathlib import Path
-
 import mujoco
 import numpy as np
 import torch
 import yaml
 
 from .locomotion_policy import LocomotionPolicy
+from .policy_assets import get_rsl_rl_assets
 
 # Joint order mapping between Isaac Lab and MuJoCo.
 #
@@ -128,16 +127,12 @@ def print_observation_debug(obs: np.ndarray, default_joint_pos: np.ndarray = Non
     print(f"  Std:    {np.std(height_scan):8.4f} m")
     print("="*70 + "\n")
 
-
-_POLICY_DIR = Path(__file__).resolve().parent / "policies" / "baseline"
-
-
 class RslRlPolicy(LocomotionPolicy):
     """RSL-RL policy that builds observations from MuJoCo sensordata."""
 
     def __init__(self, mj_model, mj_data, num_motor: int = 12):
-        policy_path = _POLICY_DIR
-        cfg = _load_env_yaml(policy_path / "env.yaml")
+        env_path, policy_path = get_rsl_rl_assets("baseline")
+        cfg = _load_env_yaml(env_path)
 
         # Control parameters from training config
         dt = cfg["sim"]["dt"]
@@ -158,7 +153,7 @@ class RslRlPolicy(LocomotionPolicy):
         )
 
         # Load TorchScript model
-        self._model = torch.jit.load(str(policy_path / "policy.pt"))
+        self._model = torch.jit.load(str(policy_path))
         self._model.eval()
         self._num_motor = num_motor
         self._dim_motor_sensor = 3 * num_motor
