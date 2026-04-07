@@ -22,20 +22,19 @@ import json
 import time
 import threading
 import argparse
+import tempfile
 import numpy as np
-import torch
 import mujoco
 import mujoco.viewer
 from threading import Thread
-
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src", "unitree_sdk2_python"))
 
 import xml.etree.ElementTree as ET
 import cv2
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowState_ as LowState_default
+from unitree_sdk2py.idl.default import (
+    unitree_go_msg_dds__LowState_ as LowState_default,
+)
 from unitree_sdk2py.go2.video.video_api import (
     VIDEO_SERVICE_NAME, VIDEO_API_VERSION, VIDEO_API_ID_GETIMAGESAMPLE,
 )
@@ -59,16 +58,7 @@ from unitree_sdk2py.go2.sport.sport_api import (
     SPORT_API_ID_SWITCHAVOIDMODE,
 )
 
-import config
-from wtw_controller import WalkTheseWaysController, DEFAULT_JOINT_ANGLES_WTW, WTW_TO_MUJOCO_CTRL
-
-# ---------------------------------------------------------------------------
-# Stand poses (ctrl order: FR, FL, RR, RL)
-# ---------------------------------------------------------------------------
-_WTW_STAND_POS = np.zeros(12, dtype=np.float64)
-for _i in range(12):
-    _WTW_STAND_POS[WTW_TO_MUJOCO_CTRL[_i]] = DEFAULT_JOINT_ANGLES_WTW[_i]
-STAND_UP_POS = _WTW_STAND_POS
+from . import config
 
 STAND_DOWN_POS = np.array([
      0.0473455,  1.22187, -2.44375,   # FR
@@ -78,80 +68,7 @@ STAND_DOWN_POS = np.array([
 ], dtype=np.float64)
 
 TRANSITION_DURATION = 2.0   # seconds (tanh ramp)
-WTW_HZ = 50                 # target WTW policy rate
-
-# Derived at import time — adapts if config.SIMULATE_DT changes
-WTW_STEP_EVERY    = max(1, round(1.0 / (WTW_HZ * config.SIMULATE_DT)))
 IDLE_SETTLE_TICKS = round(0.5 / config.SIMULATE_DT)
-
-
-# ---------------------------------------------------------------------------
-# WTW controller — reads directly from MuJoCo sensordata
-# ---------------------------------------------------------------------------
-class SportDirectController(WalkTheseWaysController):
-
-    def step_from_mujoco(
-        self,
-        sensordata: np.ndarray,
-        num_motor: int,
-        dim_motor_sensor: int,
-        commands: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Run one WTW policy step from MuJoCo sensordata.
-
-        sensordata layout (same as UnitreeSdk2Bridge.PublishLowState):
-          [0 : num_motor]              joint q   (ctrl order)
-          [num_motor : 2*num_motor]    joint dq  (ctrl order)
-          [dim_motor_sensor + 0 : +4]  IMU quaternion [w, x, y, z]
-
-        Returns target joint positions in ctrl order (FR, FL, RR, RL).
-        """
-        joint_pos_ctrl = sensordata[:num_motor]
-        joint_vel_ctrl = sensordata[num_motor : 2 * num_motor]
-        quat = sensordata[dim_motor_sensor : dim_motor_sensor + 4].astype(np.float32)
-
-        # Reorder from ctrl order (FR,FL,RR,RL) → WTW order (FL,FR,RL,RR)
-        joint_pos_wtw = np.array(
-            [joint_pos_ctrl[WTW_TO_MUJOCO_CTRL[i]] for i in range(12)],
-            dtype=np.float32,
-        )
-        joint_vel_wtw = np.array(
-            [joint_vel_ctrl[WTW_TO_MUJOCO_CTRL[i]] for i in range(12)],
-            dtype=np.float32,
-        )
-
-        obs = self._build_obs_arrays(quat, joint_pos_wtw, joint_vel_wtw, commands)
-        self.update_history(obs)
-
-        with torch.no_grad():
-            latent = self.adaptation_module(self.obs_history)
-            action = self.body(torch.cat([self.obs_history, latent], dim=1))
-
-        self.last_actions = self.actions.clone()
-        self.actions = action[0].clone()
-
-        scaled = action[0].numpy() * self.action_scale
-        scaled[[0, 3, 6, 9]] *= self.hip_scale_reduction
-        target_pos_wtw = scaled + DEFAULT_JOINT_ANGLES_WTW
-
-        self.gait_index = (self.gait_index + self.dt * commands[4]) % 1.0
-
-        target_ctrl = np.zeros(12, dtype=np.float64)
-        for i in range(12):
-            target_ctrl[WTW_TO_MUJOCO_CTRL[i]] = target_pos_wtw[i]
-        return target_ctrl
-
-    def _build_obs_arrays(self, quat, joint_pos_wtw, joint_vel_wtw, commands):
-        obs = np.zeros(self.num_obs, dtype=np.float32)
-        obs[0:3]   = self.get_gravity_vector(quat)
-        obs[3:18]  = commands * self.commands_scale
-        obs[18:30] = (joint_pos_wtw - DEFAULT_JOINT_ANGLES_WTW) * self.obs_scales["dof_pos"]
-        obs[30:42] = joint_vel_wtw * self.obs_scales["dof_vel"]
-        obs[42:54] = torch.clip(self.actions, -self.clip_actions, self.clip_actions).numpy()
-        obs[54:66] = self.last_actions.numpy()
-        obs[66:70] = self.get_clock_inputs(commands)
-        return torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +76,10 @@ class SportDirectController(WalkTheseWaysController):
 # ---------------------------------------------------------------------------
 class State:
     IDLE_CONNECTED = "idle_connected"  # settling after startup
-    STANDING       = "standing"        # WTW at zero velocity
-    STANDING_UP    = "standing_up"     # tanh transition → STAND_UP_POS
+    STANDING       = "standing"        # policy at zero velocity
+    STANDING_UP    = "standing_up"     # tanh transition → standing pose
     STANDING_DOWN  = "standing_down"   # tanh transition → STAND_DOWN_POS
-    WALKING        = "walking"         # WTW with velocity commands
+    WALKING        = "walking"         # policy with velocity commands
     DAMP           = "damp"            # motors off
 
 
@@ -175,10 +92,11 @@ class SportMuJoCoServer(Server):
     and consumed every physics step by tick().
     """
 
-    def __init__(self, controller: SportDirectController, num_motor: int):
+    def __init__(self, policy, num_motor: int):
         super().__init__(SPORT_SERVICE_NAME)
-        self._controller = controller
+        self._policy = policy
         self._num_motor  = num_motor
+        self._step_every = max(1, round(1.0 / (policy.hz * config.SIMULATE_DT)))
 
         self._lock = threading.Lock()
 
@@ -196,8 +114,8 @@ class SportMuJoCoServer(Server):
         self._sim_step   = 0
         self._idle_start_step = 0
 
-        # Cached WTW output (ctrl order) — reused between WTW steps
-        self._last_wtw_ctrl: np.ndarray | None = None
+        # Cached policy output (ctrl order) — reused between policy steps
+        self._last_policy_ctrl: np.ndarray | None = None
 
     # ------------------------------------------------------ RPC registration
     def Init(self):
@@ -231,10 +149,10 @@ class SportMuJoCoServer(Server):
     def _handle_stand_up(self, parameter: str):
         with self._lock:
             self._transition_from = self._current_q.copy()
-            self._transition_to   = STAND_UP_POS.copy()
+            self._transition_to   = self._policy.standing_pos.copy()
             self._transition_start_step = self._sim_step
             self._state = State.STANDING_UP
-            self._controller.reset()
+            self._policy.reset()
             print("[sport_mujoco] StandUp")
         return 0, ""
 
@@ -297,12 +215,12 @@ class SportMuJoCoServer(Server):
             self._sim_step += 1
 
         ctrl_target = self._current_q.copy()
-        kp, kd = 50.0, 3.5
+        kp, kd = self._policy.kp, self._policy.kd
 
         if state == State.IDLE_CONNECTED:
             if step - self._idle_start_step >= IDLE_SETTLE_TICKS:
                 with self._lock:
-                    self._controller.reset()
+                    self._policy.reset()
                     self._state = State.STANDING
                 print("[sport_mujoco] Standing complete.")
             # Hold keyframe during settle — ctrl_target already = current_q
@@ -314,7 +232,7 @@ class SportMuJoCoServer(Server):
             elapsed = (step - t_start) * config.SIMULATE_DT
             phase   = float(np.tanh(elapsed / TRANSITION_DURATION))
             ctrl_target = (1.0 - phase) * t_from + phase * t_to
-            kp = phase * 50.0 + (1.0 - phase) * 20.0
+            kp = phase * self._policy.kp + (1.0 - phase) * 20.0
             if phase >= 0.99:
                 with self._lock:
                     self._state = (
@@ -326,15 +244,12 @@ class SportMuJoCoServer(Server):
 
         elif state in (State.STANDING, State.WALKING):
             v = (vx, vy, vyaw) if state == State.WALKING else (0.0, 0.0, 0.0)
-            if step % WTW_STEP_EVERY == 0:
-                commands = self._controller.get_commands(*v)
-                self._last_wtw_ctrl = self._controller.step_from_mujoco(
-                    sensordata, num_motor, dim_motor_sensor, commands
-                )
-            if self._last_wtw_ctrl is not None:
-                ctrl_target = self._last_wtw_ctrl
-            kp = self._controller.stiffness
-            kd = self._controller.damping
+            if step % self._step_every == 0:
+                self._last_policy_ctrl = self._policy.step(sensordata, *v)
+            if self._last_policy_ctrl is not None:
+                ctrl_target = self._last_policy_ctrl
+            kp = self._policy.kp
+            kd = self._policy.kd
 
         return ctrl_target, kp, kd
 
@@ -387,13 +302,20 @@ def _load_scene(scene_path):
         if rel and not os.path.isabs(rel):
             elem.set("file", os.path.normpath(os.path.join(scene_dir, rel)))
 
-    tmp = os.path.join(go2_dir, "_tmp_scene.xml")
+    tmp_dir = tempfile.mkdtemp(prefix="sport_mujoco_")
+    tmp = os.path.join(tmp_dir, "_tmp_scene.xml")
+    # Symlink the go2 assets so MuJoCo can resolve meshdir relative paths.
+    for name in os.listdir(go2_dir):
+        src = os.path.join(go2_dir, name)
+        dst = os.path.join(tmp_dir, name)
+        if not os.path.exists(dst):
+            os.symlink(src, dst)
     try:
         tree.write(tmp, encoding="unicode", xml_declaration=False)
         return mujoco.MjModel.from_xml_path(tmp)
     finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -410,23 +332,47 @@ def main():
                         help="Save spectator-view recording to PATH (e.g. run.mp4)")
     parser.add_argument("--telemetry", metavar="PATH",       default=None,
                         help="Write simulation state snapshots to PATH (JSON)")
-    _WTW_DIR = os.path.join(os.path.dirname(__file__), "wtw")
-    parser.add_argument("--model-dir", default=_WTW_DIR)
-    parser.add_argument("--cfg-path",  default=os.path.join(_WTW_DIR, "parameters_cpu.pkl"))
+    parser.add_argument("--policy", choices=["wtw", "rsl_rl"], default="wtw",
+                        help="Locomotion policy to use (default: wtw)")
+    parser.add_argument("--heightmap", action="store_true",
+                        help="Publish HeightMap_ DDS messages via ray casting")
+    parser.add_argument("--heightmap-hz", type=float, default=10.0,
+                        help="Height map publish rate in sim-time Hz (default: 10)")
+    parser.add_argument("--heightmap-debug", action="store_true",
+                        help="Visualise height map rays in the viewer and log hit geoms")
+    parser.add_argument("--uwb", action="store_true",
+                        help="Publish UwbState_ DDS messages (requires 'uwb_tag' body)")
+    parser.add_argument("--uwb-hz", type=float, default=10.0,
+                        help="UWB publish rate in sim-time Hz (default: 10)")
+    parser.add_argument("--keyframe", default=None,
+                        help="Name of keyframe to reset to (default: first keyframe)")
     args = parser.parse_args()
+    if args.heightmap_debug:
+        args.heightmap = True
 
     # --- MuJoCo setup -------------------------------------------------------
     mj_model = _load_scene(args.scene)
     mj_data  = mujoco.MjData(mj_model)
-    mujoco.mj_resetDataKeyframe(mj_model, mj_data, 0)
+    if args.keyframe:
+        kf_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_KEY, args.keyframe)
+        if kf_id < 0:
+            raise ValueError(f"Keyframe '{args.keyframe}' not found in scene")
+        mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
+    else:
+        mujoco.mj_resetDataKeyframe(mj_model, mj_data, 0)
     mj_model.opt.timestep = config.SIMULATE_DT
 
     num_motor        = mj_model.nu
     dim_motor_sensor = 3 * num_motor  # q, dq, tau_est per motor
 
-    # --- Controller + RPC servers -------------------------------------------
-    controller = SportDirectController(args.model_dir, args.cfg_path)
-    server = SportMuJoCoServer(controller, num_motor)
+    # --- Policy + RPC servers ------------------------------------------------
+    if args.policy == "wtw":
+        from .wtw_policy import WtwPolicy
+        policy = WtwPolicy(num_motor)
+    else:
+        from .rsl_rl_policy import RslRlPolicy
+        policy = RslRlPolicy(mj_model, mj_data, num_motor)
+    server = SportMuJoCoServer(policy, num_motor)
 
     cam_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_CAMERA, "front_camera")
     has_camera = cam_id >= 0
@@ -474,8 +420,27 @@ def main():
     low_state     = LowState_default()
     low_state_pub = ChannelPublisher("rt/lowstate", LowState_)
     low_state_pub.Init()
+    # --- UWB publisher (opt-in) ---------------------------------------------
+    uwb_pub = None
+    if args.uwb:
+        has_marker = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "uwb_tag") >= 0
+        if has_marker:
+            from .uwb_publisher import UwbPublisher
+            uwb_pub = UwbPublisher(mj_model, mj_data)
+            uwb_step_every = max(1, round(1.0 / (args.uwb_hz * config.SIMULATE_DT)))
+        else:
+            print("[sport_mujoco] WARNING: --uwb requested but 'uwb_tag' body not found")
+
+    # --- height map publisher (opt-in) --------------------------------------
+    heightmap_pub = None
+    if args.heightmap:
+        from .heightmap_publisher import HeightMapPublisher
+        heightmap_pub = HeightMapPublisher(mj_model, mj_data, debug=args.heightmap_debug)
+        heightmap_step_every = max(1, round(1.0 / (args.heightmap_hz * config.SIMULATE_DT)))
+
     print("[sport_mujoco] Serving sport RPC.")
-    print(f"[sport_mujoco] WTW every {WTW_STEP_EVERY} steps → {WTW_HZ} Hz sim-time")
+    print(f"[sport_mujoco] Policy: {args.policy} @ {policy.hz} Hz "
+          f"(kp={policy.kp}, kd={policy.kd})")
 
     # --- Sim loop -----------------------------------------------------------
     _sim_step_count = 0
@@ -509,6 +474,8 @@ def main():
             dq = mj_data.sensordata[num_motor + i]
             mj_data.ctrl[i] = kp * (ctrl_target[i] - q) + kd * (-dq)
         mujoco.mj_step(mj_model, mj_data)
+        if uwb_pub is not None and _sim_step_count % uwb_step_every == 0:
+            uwb_pub.update()
         for i in range(num_motor):
             low_state.motor_state[i].q       = mj_data.sensordata[i]
             low_state.motor_state[i].dq      = mj_data.sensordata[num_motor + i]
@@ -556,6 +523,8 @@ def main():
             }
             telemetry_file.write(_json.dumps(snapshot) + "\n")
             telemetry_file.flush()
+        if heightmap_pub is not None and _sim_step_count % heightmap_step_every == 0:
+            heightmap_pub.update()
         _sim_step_count += 1
 
     try:
@@ -584,6 +553,8 @@ def main():
             def PhysicsViewerThread():
                 while viewer.is_running():
                     with locker:
+                        if heightmap_pub is not None and heightmap_pub._debug:
+                            heightmap_pub.draw_debug(viewer.user_scn)
                         viewer.sync()
                     time.sleep(config.VIEWER_DT)
 

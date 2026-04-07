@@ -1,0 +1,26 @@
+[project]
+name = "unitree-mujoco"
+version = "0.1.0"
+description = "Unitree MuJoCo simulation with sport RPC server"
+requires-python = ">=3.11"
+dependencies = [
+    "huggingface_hub>=0.32.0",
+    "mujoco>=3.6.0",
+    "numpy",
+    "opencv-python",
+    "torch",
+    "pyyaml",
+    "unitree-sdk2py",
+]
+
+[project.scripts]
+sport-mujoco = "unitree_mujoco.simulate_python.sport_mujoco:main"
+
+[tool.setuptools]
+package-dir = {"unitree_mujoco" = "."}
+packages = ["unitree_mujoco", "unitree_mujoco.simulate_python"]
+
+[tool.setuptools.package-data]
+unitree_mujoco = [
+    "unitree_robots/**/*",
+]
